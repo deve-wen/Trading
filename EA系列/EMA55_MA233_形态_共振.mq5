@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                     EMA55_MA233_形态_共振.mq5     |
 //|                                          Senior Developer         |
+//|                                          Version: 1.01            |
 //|                                                                  |
 //|  策略: 1M EMA55/MA233金叉死叉趋势 + K线形态/123法则共振入场      |
 //|                                                                  |
@@ -13,8 +14,12 @@
 //|    空头趋势中: 反弹形成M顶/头肩顶/123空头 → 破颈线 → 下根K开空   |
 //|                                                                  |
 //|  【出场】                                                         |
-//|    止损: 颈线±300点(3美金) | 止盈: 入场±1200点(12美金)          |
+//|    止损: 入场±300点(严格固定) | 止盈: 入场±1200点(12美金)       |
 //|    追踪止损: 200点激活 → 500点保本                                |
+//|                                                                  |
+//|  【v1.01 关键修复】                                                |
+//|    ★ 止损从"颈线±300点"改为"入场±300点"(防止跳空导致止损过大)   |
+//|    ★ 新增同信号最大开仓次数限制(默认3次,可在参数中设置)           |
 //|                                                                  |
 //|  【风控】                                                         |
 //|    交易时间: 北京时间 07:30 ~ 次日03:30                           |
@@ -22,10 +27,9 @@
 //|    当日最大亏损限制, 点差限制                                     |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "1.00"
-#property description "1M EMA55/MA233趋势 + K线形态/123法则共振EA"
-#property description "多头:W底/头肩底/123破颈线开多 | 空头:M顶/头肩顶/123破颈线开空"
-#property description "止损:颈线±300点 | 止盈:1200点 | 追踪:200激活500保本"
+#property version   "1.01"
+#property description "1M EMA55/MA233趋势 + K线形态/123法则共振EA v1.01"
+#property description "★ v1.01修复: SL严格基于入场价(非颈线)+同信号最多3单"
 
 #include <Trade\Trade.mqh>
 
@@ -34,12 +38,13 @@
 //+------------------------------------------------------------------+
 input group   "=== ★ 策略核心参数 ==="
 input int     InpMagicNumber     = 20260525;        // 魔法编号
-input double  InpStopLossPts     = 300;             // 止损距颈线(点数,300=3美金)
+input double  InpStopLossPts     = 300;             // 止损距入场价(点数,严格固定)
 input double  InpTakeProfitPts   = 1200;            // 止盈点数(1200=12美金)
 input int     InpSwingLookback   = 5;               // 摆动点识别回看K线数
 input double  InpSwingMinPts     = 30;              // 最小摆动幅度(点数)
 input double  InpNecklineTolPct  = 0.3;             // 颈线容差(%价格)
 input int     InpPatternExpire   = 30;              // 形态失效时间(K线数)
+input int     InpMaxEntryCount   = 3;               // 同一信号最大开仓次数(1~5)
 
 input group   "=== ★ 趋势参数 ==="
 input int     InpEMAPeriod       = 55;              // EMA快线周期
@@ -114,9 +119,10 @@ PatternInfo    g_patterns[5];                     // 活跃形态(最多5个)
 int            g_patCount     = 0;                // 活跃形态数量
 
 //--- 入场状态
-bool           g_entryPending = false;            // 颈线已突破,等待入场
-int            g_entryDir     = 0;                // 待入场方向: 1=多 -1=空
-double         g_entryNeckline = 0;               // 入场对应的颈线价格
+bool           g_entryPending     = false;        // 颈线已突破,等待入场
+int            g_entryDir         = 0;            // 待入场方向: 1=多 -1=空
+double         g_entryNeckline    = 0;            // 入场对应的颈线价格
+int            g_signalEntryCount = 0;            // 当前信号已开仓次数(限制≤3)
 
 //--- K线追踪
 datetime       g_lastBar      = 0;                // 上次处理的K线时间
@@ -199,16 +205,17 @@ int OnInit()
 
    //--- 打印启动信息
    Print("╔══════════════════════════════════════════╗");
-   Print("║ EMA55/MA233 + 形态/123法则 共振EA v1.00 ║");
+   Print("║ EMA55/MA233 + 形态/123法则 共振EA v1.01 ║");
    Print("╠══════════════════════════════════════════╣");
    Print("║ 服务器时间: ", TimeToString(TimeCurrent()));
    Print("║ 北京时间:   ", TimeToString(TimeCurrent() + g_bjOffset));
    Print("║ 交易品种:   ", _Symbol);
-   Print("║ 止损(颈线±):", InpStopLossPts, "点 = ", InpStopLossPts*10, "美分");
+   Print("║ 止损(入场±):", InpStopLossPts, "点 = ", InpStopLossPts*10, "美分");
    Print("║ 止盈(入场±):", InpTakeProfitPts, "点 = ", InpTakeProfitPts*10, "美分");
    Print("║ 趋势:       EMA", InpEMAPeriod, "/MA", InpMAPeriod);
    Print("║ 摆动回看:   ", InpSwingLookback, "K | 最小幅度:", InpSwingMinPts, "点");
    Print("║ 形态失效:   ", InpPatternExpire, "K线");
+   Print("║ 同信号上限: ", InpMaxEntryCount, "单");
    Print("║ 追踪:", InpTrailActivate, "激活", InpTrailDistance, "保本");
    Print("╚══════════════════════════════════════════╝");
 
@@ -801,7 +808,8 @@ void ClearPatterns()
       g_patterns[i].active = false;
    g_patCount = 0;
    g_entryPending = false;
-   Print("🧹 趋势反转,清除所有活跃形态");
+   g_signalEntryCount = 0;
+   Print("🧹 趋势反转,清除所有活跃形态,重置开仓计数");
 }
 
 //+==================================================================+
@@ -843,6 +851,7 @@ void ProcessBar()
          Print("📋 诊断: 趋势=", (g_trend == TREND_BULL ? "多头" : "空头"),
                " 摆动点=", g_swingCount,
                " 活跃形态=", g_patCount,
+               " 已开仓=", g_signalEntryCount, "/", InpMaxEntryCount,
                " 待入场=", (g_entryPending ? "是" : "否"));
       }
 
@@ -921,6 +930,14 @@ void CheckEntry()
 {
    if(!g_entryPending) return;
 
+   //--- ★ 同一信号开仓次数限制(防止连环开单)
+   if(g_signalEntryCount >= InpMaxEntryCount)
+   {
+      g_entryPending = false;
+      Print("⛔ 同一信号已达最大开仓次数(", InpMaxEntryCount, "次),不再入场");
+      return;
+   }
+
    //--- 确认已进入新K线(破颈线的K线已完成)
    datetime curBar = iTime(_Symbol, PERIOD_M1, 0);
    if(curBar == 0) return;
@@ -969,15 +986,16 @@ void CheckEntry()
 
 //+------------------------------------------------------------------+
 //| 开多单                                                            |
-//|  SL = 颈线 - 300点 | TP = 入场价 + 1200点                        |
+//|  SL = 入场价 - 300点(严格固定) | TP = 入场价 + 1200点             |
 //+------------------------------------------------------------------+
 void OpenBuy(double lot)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double sl  = NormalizeDouble(g_entryNeckline - InpStopLossPts * g_pt, g_dig);
+   // ★ 止损严格基于入场价,不再基于颈线(防止跳空导致止损过大)
+   double sl  = NormalizeDouble(ask - InpStopLossPts * g_pt, g_dig);
    double tp  = NormalizeDouble(ask + InpTakeProfitPts * g_pt, g_dig);
 
-   //--- 修正SL/TP以满足最小距离
+   //--- 修正SL/TP以满足交易所最小距离(仅保下限,不改变上限)
    FixSLTP(ask, true, sl, tp);
 
    //--- 有效性校验
@@ -994,12 +1012,14 @@ void OpenBuy(double lot)
 
    if(m_trade.Buy(lot, _Symbol, ask, sl, tp, "形态共振-多"))
    {
+      g_signalEntryCount++;    // ★ 开仓计数+1
       Print("✅ 多单开仓成功  Lot=", DoubleToString(lot, 2),
             " 入场=", DoubleToString(ask, g_dig),
             " SL=", DoubleToString(sl, g_dig),
-            " (颈线=", DoubleToString(g_entryNeckline, g_dig), "↓",
+            " (距入场", DoubleToString(InpStopLossPts, 0), "点=",
             DoubleToString(InpStopLossPts*10, 0), "美分)",
-            " TP=", DoubleToString(tp, g_dig));
+            " TP=", DoubleToString(tp, g_dig),
+            " [信号第", g_signalEntryCount, "/", InpMaxEntryCount, "单]");
    }
    else
    {
@@ -1009,15 +1029,16 @@ void OpenBuy(double lot)
 
 //+------------------------------------------------------------------+
 //| 开空单                                                            |
-//|  SL = 颈线 + 300点 | TP = 入场价 - 1200点                        |
+//|  SL = 入场价 + 300点(严格固定) | TP = 入场价 - 1200点             |
 //+------------------------------------------------------------------+
 void OpenSell(double lot)
 {
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double sl  = NormalizeDouble(g_entryNeckline + InpStopLossPts * g_pt, g_dig);
+   // ★ 止损严格基于入场价,不再基于颈线(防止跳空导致止损过大)
+   double sl  = NormalizeDouble(bid + InpStopLossPts * g_pt, g_dig);
    double tp  = NormalizeDouble(bid - InpTakeProfitPts * g_pt, g_dig);
 
-   //--- 修正SL/TP
+   //--- 修正SL/TP以满足交易所最小距离(仅保下限,不改变上限)
    FixSLTP(bid, false, sl, tp);
 
    if(sl <= bid)
@@ -1033,12 +1054,14 @@ void OpenSell(double lot)
 
    if(m_trade.Sell(lot, _Symbol, bid, sl, tp, "形态共振-空"))
    {
+      g_signalEntryCount++;    // ★ 开仓计数+1
       Print("✅ 空单开仓成功  Lot=", DoubleToString(lot, 2),
             " 入场=", DoubleToString(bid, g_dig),
             " SL=", DoubleToString(sl, g_dig),
-            " (颈线=", DoubleToString(g_entryNeckline, g_dig), "↑",
+            " (距入场", DoubleToString(InpStopLossPts, 0), "点=",
             DoubleToString(InpStopLossPts*10, 0), "美分)",
-            " TP=", DoubleToString(tp, g_dig));
+            " TP=", DoubleToString(tp, g_dig),
+            " [信号第", g_signalEntryCount, "/", InpMaxEntryCount, "单]");
    }
    else
    {
@@ -1351,6 +1374,7 @@ void ResetDay()
    g_trailRetries = 0;
    g_trailTicket  = 0;
    g_entryPending = false;
+   g_signalEntryCount = 0;
    ClearPatterns();
 
    Print("📅 新交易日初始化 余额=", DoubleToString(g_dayBal, 2));
