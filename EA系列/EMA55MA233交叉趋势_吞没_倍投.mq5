@@ -1,0 +1,1076 @@
+//+------------------------------------------------------------------+
+//|                                     EMA55_MA233_吞没_倍投.mq5 |
+//|  EMA55/MA233金叉死叉趋势 + K线吞没形态 + 逆势倍投(马丁格尔)       |
+//|                                                                   |
+//|  策略核心:                                                        |
+//|  1. 趋势判断: EMA55上穿MA233=金叉多头 / EMA55下穿MA233=死叉空头  |
+//|  2. 顺势吞没形态入场:                                              |
+//|     多头: 回调阴线→被阳线吞没→收盘开多                            |
+//|     空头: 反弹阳线→被阴线吞没→收盘开空                            |
+//|  3. 每单固定SL=300点 TP=660点, 追踪:20点激活/320点保本    |
+//|  4. 连续亏损N次则暂停M分钟                                         |
+//|  5. 趋势反转时2x倍投(也需吞没形态确认), 同组总点数达标全部平仓    |
+//+------------------------------------------------------------------+
+#property copyright "Senior Developer"
+#property version   "2.04"
+#property description "EMA55趋势+K线吞没形态开仓+逆势倍投+固定SL/TP+点数追踪"
+#property description "① 价格>EMA55=多头 价格<EMA55=空头"
+#property description "② 多头:阴线被阳线吞没→开多 | 空头:阳线被阴线吞没→开空"
+#property description "③ 每单固定SL=300点 TP=660点, 追踪:20点激活/320点保本"
+#property description "④ 趋势反转+吞没形态=2x逆势倍投,最高N次(默认3次)"
+
+#include <Trade\Trade.mqh>
+#include <Trade\AccountInfo.mqh>
+
+//+------------------------------------------------------------------+
+//| 输入参数 - 核心策略                                               |
+//+------------------------------------------------------------------+
+input group   "=== ★ 核心策略参数 ==="
+input int     InpMagicNumber     = 20260629;        // 魔法编号
+input int     InpFastMAPeriod    = 55;              // 快线MA周期(EMA55)
+input ENUM_MA_METHOD  InpFastMAMethod = MODE_EMA;   // 快线MA类型
+input int     InpSlowMAPeriod    = 233;             // 慢线MA周期(MA233)
+input ENUM_MA_METHOD  InpSlowMAMethod = MODE_SMA;   // 慢线MA类型
+input ENUM_APPLIED_PRICE InpMAApplied = PRICE_CLOSE; // MA应用价格
+
+input group   "=== ★ 开仓与倍投 ==="
+input int     InpMaxDoubles      = 3;               // 最高倍投次数(0=不倍投)
+input int     InpMinPullback     = 2;               // 最小连续回调K线数(吞没前) >=2
+
+input group   "=== ★ 交易时间(北京时间) ==="
+input int     InpGMTOffset       = 5;               // 服务器比北京晚N小时(MT5=5)
+input int     InpStartHour       = 7;               // 交易开始 时(北京)
+input int     InpStartMin        = 30;              // 交易开始 分(北京)
+input int     InpEndHour         = 3;               // 交易结束 时(北京次日)
+input int     InpEndMin          = 30;              // 交易结束 分(北京次日)
+
+input group   "=== ★ 仓位管理 ==="
+input bool    InpUseFixedLot     = true;            // true=固定手数 false=百分比
+input double  InpFixedLot        = 0.01;            // 固定手数(首单)
+input double  InpRiskPercent     = 1.0;             // 风险百分比(%)
+input double  InpMinLot          = 0.01;            // 最小手数
+input double  InpMaxLot          = 10.0;            // 最大手数
+
+input group   "=== ★ 风控管理 ==="
+input bool    InpUseDailyLoss    = true;            // 启用当日最大亏损限制
+input double  InpDailyLossPct    = 5.0;             // 当日最大亏损(%)
+input bool    InpUseSpreadLimit  = true;            // 启用点差限制
+input int     InpMaxSpread       = 50;              // 最大允许点差
+
+input group   "=== ★ 连续亏损暂停 ==="
+input bool    InpUseCooldown     = true;            // 启用连续亏损暂停
+input int     InpMaxConsecLoss   = 3;               // 连续亏损N次后暂停
+input int     InpCooldownMins    = 90;              // 暂停时间(分钟)
+
+input group   "=== ★ 止损与追踪(每单独立) ==="
+input int     InpSLPoints        = 300;             // 固定止损点数(每单自动带)
+input int     InpTPPoints        = 660;             // 固定止盈点数(每单自动带)
+input bool    InpUseTrailing     = true;            // 启用追踪止损
+input int     InpTrailStartPts   = 20;              // 追踪激活利润点数(XAUUSD 0.01=0.2$)
+input int     InpTrailBreakevenPts = 320;           // 追踪保本点数(损移至入场价,$3.2)
+
+//+------------------------------------------------------------------+
+//| 全局对象                                                         |
+//+------------------------------------------------------------------+
+CTrade        m_trade;
+CAccountInfo  m_account;
+
+//--- 指标句柄
+int           g_hFastMA = INVALID_HANDLE; // 快线MA句柄(EMA55)
+int           g_hSlowMA = INVALID_HANDLE; // 慢线MA句柄(MA233)
+int           g_trendDir = 0;             // 趋势方向: 1=多(金叉状态), -1=空(死叉状态)
+
+//+------------------------------------------------------------------+
+//| 组状态结构 - 一个同组交易内的所有信息                             |
+//+------------------------------------------------------------------+
+struct GroupState
+{
+   bool   active;          // 是否有活跃组
+   int    groupID;         // 组ID(TimeCurrent创建时)
+   int    baseDir;         // 首单方向: 1=Buy, -1=Sell
+   int    currentLevel;    // 当前最高层级(-1=无单, 0=首单, 1=第1次倍投...)
+   ulong  tickets[4];      // 各层级订单票据(0~InpMaxDoubles, max 4)
+   double lots[4];         // 各层级手数
+   int    dirs[4];         // 各层级方向: 1=Buy, -1=Sell
+
+   GroupState() { Reset(); }
+
+   void Reset()
+   {
+      active       = false;
+      groupID      = 0;
+      baseDir      = 0;
+      currentLevel = -1;
+      for(int i = 0; i < 4; i++)
+      {
+         tickets[i] = 0;
+         lots[i]    = 0.0;
+         dirs[i]    = 0;
+      }
+   }
+};
+GroupState g_group;
+
+//--- 每Bar入场锁定(每个完成K线最多触发一次)
+datetime g_lastEntryBar  = 0;  // 最近一次开首单的完成K线时间
+datetime g_lastDoubleBar = 0;  // 最近一次倍投的完成K线时间
+
+//--- 同Bar平仓后禁开(同一K线上平仓则不再开新单)
+datetime g_lastCloseBarTime = 0;
+
+//--- 连续亏损暂停
+int g_consecLossCount = 0;       // 当前连续亏损次数
+datetime g_cooldownUntil = 0;    // 暂停截止时间(0=无暂停)
+
+//--- 日初权益(用于计算当日亏损)
+double g_dailyEquity = 0.0;
+datetime g_lastDayCheck = 0;
+
+//+------------------------------------------------------------------+
+//| 追踪止损状态(每单独立)                                            |
+//+------------------------------------------------------------------+
+struct TrailState
+{
+   ulong  ticket;       // 持仓票据
+   bool   activated;    // 是否已激活(利润>=阈值)
+   double bestPrice;    // 多单=Bid最高价 / 空单=Ask最低价
+   int    direction;    // 1=多, -1=空
+};
+TrailState g_trails[10]; // 最多同时追踪10个持仓
+int g_trailCount = 0;
+
+//--- 追踪止损持久化数组(替代函数内的static数组, MQL5不支持局部static数组)
+ulong   g_trailTickets[10];
+double  g_trailBestPrices[10];
+bool    g_trailActivated[10];
+int     g_trailPersistCount = 0;
+
+//--- 连续亏损暂停日志(替代嵌套块内的static, MQL5不支持块级static)
+datetime g_lastCooldownLog = 0;
+
+//--- 组重建用的临时结构体(MQL5不支持函数内局部struct)
+struct TempPos { ulong ticket; int level; int dir; double lot; };
+
+//+------------------------------------------------------------------+
+//| 点数→账户货币换算(1点 = 1个tickSize)                              |
+//|  XAUUSD 0.01手: 1点(0.01价格) = tickValue * 0.01 = 0.01$          |
+//+------------------------------------------------------------------+
+double PointsToDollars(double points, double volume)
+{
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue <= 0) return(0);
+   return(points * volume * tickValue);
+}
+
+//+------------------------------------------------------------------+
+//| 获取同组总持仓手数                                                |
+//+------------------------------------------------------------------+
+double GetGroupTotalVolume()
+{
+   double total = 0.0;
+   for(int i = 0; i <= g_group.currentLevel; i++)
+   {
+      if(g_group.tickets[i] > 0 && PositionSelectByTicket(g_group.tickets[i]))
+         total += PositionGetDouble(POSITION_VOLUME);
+   }
+   return(total);
+}
+
+//+------------------------------------------------------------------+
+//| 专家初始化函数                                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- 参数校验
+   if(InpFastMAPeriod < 2) { Print("❌ 快线MA周期必须>=2"); return(INIT_PARAMETERS_INCORRECT); }
+   if(InpSlowMAPeriod < 2) { Print("❌ 慢线MA周期必须>=2"); return(INIT_PARAMETERS_INCORRECT); }
+   if(InpMaxDoubles < 0 || InpMaxDoubles > 3)
+   {
+      Print("❌ 最高倍投次数范围为0~3"); return(INIT_PARAMETERS_INCORRECT);
+   }
+   if(InpFixedLot <= 0 || InpMinLot <= 0 || InpMaxLot <= 0)
+   {
+      Print("❌ 手数参数必须>0"); return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   //--- 设置交易参数
+   m_trade.SetExpertMagicNumber(InpMagicNumber);
+   m_trade.SetDeviationInPoints(50);
+   m_trade.SetAsyncMode(false);
+
+   //--- 创建快线MA句柄(EMA55)
+   g_hFastMA = iMA(_Symbol, _Period, InpFastMAPeriod, 0, InpFastMAMethod, InpMAApplied);
+   if(g_hFastMA == INVALID_HANDLE)
+   {
+      Print("❌ 创建快线MA失败"); return(INIT_FAILED);
+   }
+
+   //--- 创建慢线MA句柄(MA233)
+   g_hSlowMA = iMA(_Symbol, _Period, InpSlowMAPeriod, 0, InpSlowMAMethod, InpMAApplied);
+   if(g_hSlowMA == INVALID_HANDLE)
+   {
+      Print("❌ 创建慢线MA失败"); return(INIT_FAILED);
+   }
+
+   //--- 预热指标数据
+   int needBars = (InpFastMAPeriod > InpSlowMAPeriod ? InpFastMAPeriod : InpSlowMAPeriod) + 10;
+   if(Bars(_Symbol, _Period) < needBars)
+   {
+      Print("❌ K线数据不足, 需要至少", needBars, "根K线");
+      return(INIT_FAILED);
+   }
+
+   //--- 初始化趋势方向(优先取当前bar, 若指标未就绪则默认多头, 等OnTick更新)
+   double fast0[1], slow0[1];
+   if(CopyBuffer(g_hFastMA, 0, 0, 1, fast0) < 1 || CopyBuffer(g_hSlowMA, 0, 0, 1, slow0) < 1)
+   {
+      g_trendDir = 1;
+      Print("⚠️ 指标数据未就绪, 默认多头趋势, 将在OnTick中更新");
+   }
+   else
+   {
+      g_trendDir = (fast0[0] > slow0[0]) ? 1 : -1;
+   }
+   Print("   初始趋势: ", g_trendDir == 1 ? "多头(金叉)" : "空头(死叉)");
+
+   //--- 恢复组状态
+   RebuildGroupFromPositions();
+
+   //--- 初始化日初权益
+   UpdateDailyEquity();
+
+   //--- 定时器
+   EventSetTimer(1);
+
+   //--- 打印启动信息
+   Print("✅ EMA55_MA233_吞没_倍投 EA v2.03 启动");
+   Print("   交易品种: ", _Symbol, " | 周期: ", EnumToString(_Period));
+   Print("   快线MA:", InpFastMAPeriod, "(", EnumToString(InpFastMAMethod), ") | 慢线MA:", InpSlowMAPeriod, "(", EnumToString(InpSlowMAMethod), ")");
+   Print("   固定止损:", InpSLPoints, "点 | 固定止盈:", InpTPPoints, "点 | 最高倍投:", InpMaxDoubles, "次");
+   if(InpUseTrailing)
+      Print("   追踪: 开启 | ", InpTrailStartPts, "点激活, ", InpTrailBreakevenPts, "点保本");
+   else
+      Print("   追踪: 关闭");
+   Print("   北京时间 ", InpStartHour, ":", StringFormat("%02d", InpStartMin),
+         " ~ 次日", InpEndHour, ":", StringFormat("%02d", InpEndMin));
+
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| 专家反初始化函数                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   if(g_hFastMA != INVALID_HANDLE) { IndicatorRelease(g_hFastMA); g_hFastMA = INVALID_HANDLE; }
+   if(g_hSlowMA != INVALID_HANDLE) { IndicatorRelease(g_hSlowMA); g_hSlowMA = INVALID_HANDLE; }
+   Print("🔴 EA停止, 原因代码:", reason);
+}
+
+//+------------------------------------------------------------------+
+//| 定时器事件                                                       |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   OnTick();
+}
+
+//+------------------------------------------------------------------+
+//| 更新趋势方向(基于EMA55与MA233金叉/死叉)                            |
+//|  金叉: EMA55上穿MA233 → g_trendDir = 1 (多头)                      |
+//|  死叉: EMA55下穿MA233 → g_trendDir = -1(空头)                     |
+//|  未交叉: 维持原方向                                                  |
+//+------------------------------------------------------------------+
+void UpdateTrendDirection()
+{
+   double fast[3], slow[3];
+   // 取完成K线 idx=1,2,3 的三根数据做交叉检测
+   if(CopyBuffer(g_hFastMA, 0, 1, 3, fast) < 3) return;
+   if(CopyBuffer(g_hSlowMA, 0, 1, 3, slow) < 3) return;
+
+   // ============ 1) 金叉/死叉精确检测 ============
+   // fast[0]=bar1, fast[1]=bar2
+   // 金叉: 本bar快线>慢线 且 前bar快线<=慢线 (空→多转换)
+   if(fast[0] > slow[0] && fast[1] <= slow[1])
+   {
+      if(g_trendDir != 1)
+         Print("🔵 金叉! EMA55=", DoubleToString(fast[0], 2), " MA233=", DoubleToString(slow[0], 2), " → 多头趋势");
+      g_trendDir = 1;
+      return;
+   }
+   // 死叉: 本bar快线<慢线 且 前bar快线>=慢线 (多→空转换)
+   if(fast[0] < slow[0] && fast[1] >= slow[1])
+   {
+      if(g_trendDir != -1)
+         Print("🔴 死叉! EMA55=", DoubleToString(fast[0], 2), " MA233=", DoubleToString(slow[0], 2), " → 空头趋势");
+      g_trendDir = -1;
+      return;
+   }
+
+   // ============ 2) 未交叉时: 确保方向与当前位置一致 ============
+   // 修复: EA启动时如果默认方向错误, 或无交叉持续期间, 及时修正
+   if(g_trendDir == 1 && fast[0] < slow[0])
+   {
+      Print("⚠️ 趋势修正: 多头→空头 (FAST=", DoubleToString(fast[0],2), " < SLOW=", DoubleToString(slow[0],2), ")");
+      g_trendDir = -1;
+   }
+   else if(g_trendDir == -1 && fast[0] > slow[0])
+   {
+      Print("⚠️ 趋势修正: 空头→多头 (FAST=", DoubleToString(fast[0],2), " > SLOW=", DoubleToString(slow[0],2), ")");
+      g_trendDir = 1;
+   }
+   // 方向与当前位置一致 → 不做任何改变（持续当前趋势）
+}
+//+------------------------------------------------------------------+
+//| 多空吞没形态检测                                                  |
+//|  idx = 完成K线索引(1=最新完成)                                    |
+//|  多头吞没: idx处为阳线(close>open), idx+1处为阴线(close<open)     |
+//|            阳线实体完整覆盖阴线实体                                |
+//|  空头吞没: idx处为阴线(close<open), idx+1处为阳线(close>open)     |
+//|            阴线实体完整覆盖阳线实体                                |
+//+------------------------------------------------------------------+
+bool IsBullishEngulfing(int idx)
+{
+   double open2  = iOpen(_Symbol, _Period, idx);     // 当前K线(吞没方)
+   double close2 = iClose(_Symbol, _Period, idx);
+   double open1  = iOpen(_Symbol, _Period, idx + 1); // 前一根K线(被吞没方)
+   double close1 = iClose(_Symbol, _Period, idx + 1);
+
+   // idx+1 必须为阴线(close < open) → 代表回调
+   if(close1 >= open1) return(false);
+
+   // idx 必须为阳线(close > open) → 代表趋势恢复
+   if(close2 <= open2) return(false);
+
+   // 阳线实体完全覆盖阴线实体
+   if(!(open2 <= close1 && close2 >= open1)) return(false);
+
+   // ★ 新增: 检查是否至少有 InpMinPullback 根连续阴线(包含被吞没的那根)
+   //    即 idx+1 到 idx+InpMinPullback 都是阴线
+   for(int k = 1; k <= InpMinPullback; k++)
+   {
+      double o = iOpen(_Symbol, _Period, idx + k);
+      double c = iClose(_Symbol, _Period, idx + k);
+      if(c >= o) return(false); // 不是阴线 → 连续回调不够
+   }
+
+   return(true);
+}
+
+bool IsBearishEngulfing(int idx)
+{
+   double open2  = iOpen(_Symbol, _Period, idx);     // 当前K线(吞没方)
+   double close2 = iClose(_Symbol, _Period, idx);
+   double open1  = iOpen(_Symbol, _Period, idx + 1); // 前一根K线(被吞没方)
+   double close1 = iClose(_Symbol, _Period, idx + 1);
+
+   // idx+1 必须为阳线(close > open) → 代表反弹
+   if(close1 <= open1) return(false);
+
+   // idx 必须为阴线(close < open) → 代表趋势恢复
+   if(close2 >= open2) return(false);
+
+   // 阴线实体完全覆盖阳线实体
+   if(!(open2 >= close1 && close2 <= open1)) return(false);
+
+   // ★ 新增: 检查是否至少有 InpMinPullback 根连续阳线(包含被吞没的那根)
+   for(int k = 1; k <= InpMinPullback; k++)
+   {
+      double o = iOpen(_Symbol, _Period, idx + k);
+      double c = iClose(_Symbol, _Period, idx + k);
+      if(c <= o) return(false); // 不是阳线 → 连续反弹不够
+   }
+
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//| 吞没入场方向检测 - 返回 1=多, -1=空, 0=无信号                    |
+//|  趋势方向由 UpdateTrendDirection() 维护:                             |
+//|    g_trendDir=1(金叉多头) → 只找多头吞没                           |
+//|    g_trendDir=-1(死叉空头) → 只找空头吞没                          |
+//+------------------------------------------------------------------+
+int CheckEngulfingEntry()
+{
+   // 多头趋势 + 多头吞没形态
+   if(g_trendDir == 1 && IsBullishEngulfing(1))
+      return(1);
+
+   // 空头趋势 + 空头吞没形态
+   if(g_trendDir == -1 && IsBearishEngulfing(1))
+      return(-1);
+
+   return(0);
+}
+
+//+------------------------------------------------------------------+
+//| 连续亏损暂停: 组关闭时调用                                          |
+//|  wasTP = true  → 组止盈达标(盈利), 重置连续亏损计数                 |
+//|  wasTP = false → 组被止损/异常关闭(亏损), 递增计数, 达上限则暂停   |
+//+------------------------------------------------------------------+
+void OnGroupClosed(bool wasTP)
+{
+   if(!InpUseCooldown) return;
+
+   if(wasTP)
+   {
+      // 盈利→重置
+      if(g_consecLossCount > 0)
+      {
+         Print("📊 组盈利平仓, 连续亏损计数清零 (之前:", g_consecLossCount, ")");
+         g_consecLossCount = 0;
+         g_cooldownUntil = 0;
+      }
+   }
+   else
+   {
+      g_consecLossCount++;
+      Print("📊 组亏损关闭, 连续亏损:", g_consecLossCount, "/", InpMaxConsecLoss);
+
+      if(g_consecLossCount >= InpMaxConsecLoss)
+      {
+         g_cooldownUntil = TimeCurrent() + InpCooldownMins * 60;
+         Print("🚫 连续", g_consecLossCount, "次亏损, 暂停交易至 ",
+               TimeToString(g_cooldownUntil));
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 追踪止损处理                                                      |
+//| 每单开仓时已自带固定SL/TP                                          |
+//| 追踪: 利润≥20点激活, 利润≥320点时SL移至入场价保本                  |
+//| 止盈位始终不变                                                     |
+//+------------------------------------------------------------------+
+void ProcessPositionSLTrailing()
+{
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0 || tickSize <= 0) return;
+
+   //--- 跨Tick追踪状态(用全局数组持久化)
+   g_trailCount = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!PositionGetTicket(i)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      ulong ticket = PositionGetTicket(i);
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      int posType = (int)PositionGetInteger(POSITION_TYPE);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double curPrice = (posType == POSITION_TYPE_BUY) ?
+                        SymbolInfoDouble(_Symbol, SYMBOL_BID) :
+                        SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double currSL = PositionGetDouble(POSITION_SL);
+
+      //--- 利润换算为点数(-1表示任何手数的通用单位)
+      double profitPts = (tickValue > 0) ? profit / (volume * tickValue) : 0;
+
+      //--- 查找/创建追踪记录
+      bool found = false;
+      int tIdx = -1;
+      for(int t = 0; t < g_trailPersistCount; t++)
+      {
+         if(g_trailTickets[t] == ticket) { found = true; tIdx = t; break; }
+      }
+
+      if(!found)
+      {
+         // 新持仓: 初始化追踪状态
+         if(g_trailPersistCount >= 10) continue;
+         tIdx = g_trailPersistCount;
+         g_trailTickets[tIdx] = ticket;
+         g_trailActivated[tIdx] = false;
+         g_trailBestPrices[tIdx] = curPrice;
+         g_trailPersistCount++;
+      }
+
+      //--- 追踪诊断: 写入g_trails
+      if(g_trailCount < 10)
+      {
+         g_trails[g_trailCount].ticket    = ticket;
+         g_trails[g_trailCount].direction = (posType == POSITION_TYPE_BUY) ? 1 : -1;
+         g_trails[g_trailCount].activated = g_trailActivated[tIdx];
+         g_trails[g_trailCount].bestPrice = g_trailBestPrices[tIdx];
+         g_trailCount++;
+      }
+
+      //--- 检查是否激活追踪
+      if(!InpUseTrailing) continue;
+
+      if(!g_trailActivated[tIdx] && profitPts >= InpTrailStartPts)
+      {
+         g_trailActivated[tIdx] = true;
+         g_trailBestPrices[tIdx] = curPrice;
+         Print("🔔 追踪激活 票据=", ticket, " 利润=", DoubleToString(profitPts, 1), "点 ($", DoubleToString(profit, 2), ")");
+      }
+
+      if(!g_trailActivated[tIdx]) continue;
+
+      //--- 更新最优价格(仅向有利方向)
+      if(posType == POSITION_TYPE_BUY && curPrice > g_trailBestPrices[tIdx])
+         g_trailBestPrices[tIdx] = curPrice;
+      else if(posType == POSITION_TYPE_SELL && curPrice < g_trailBestPrices[tIdx])
+         g_trailBestPrices[tIdx] = curPrice;
+
+      //--- 计算追踪止损价
+      //    公式: trailSL = bestPrice - direction * InpTrailBreakevenPts * tickSize
+      //    在320点时 trailSL 正好到入场价
+      double trailSL = g_trailBestPrices[tIdx] -
+                       (posType == POSITION_TYPE_BUY ? 1 : -1) * InpTrailBreakevenPts * tickSize;
+
+      //--- 计算保本底线: 初始止损价
+      double stopLimit = openPrice -
+                         (posType == POSITION_TYPE_BUY ? 1 : -1) * InpSLPoints * tickSize;
+
+      //--- 最终SL = 取追踪SL和保本底线中更优的那个
+      double newSL = (posType == POSITION_TYPE_BUY) ?
+                     fmax(stopLimit, trailSL) :   // 多: 取更高
+                     fmin(stopLimit, trailSL);    // 空: 取更低
+
+      //--- 只在新SL比当前SL更有利时才修改
+      bool needModify = false;
+      if(posType == POSITION_TYPE_BUY && newSL > currSL) needModify = true;
+      if(posType == POSITION_TYPE_SELL && (currSL == 0 || newSL < currSL)) needModify = true;
+
+      if(needModify)
+      {
+         if(m_trade.PositionModify(ticket, newSL, 0))
+            Print("   SL更新 票据=", ticket, " → ", DoubleToString(newSL, 2), " (利润=", DoubleToString(profitPts, 1), "点)");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 标记组内某持仓已关闭(非组止盈主动关的)                            |
+//+------------------------------------------------------------------+
+void MarkGroupTicketClosed(ulong closedTicket)
+{
+   if(!g_group.active) return;
+   for(int i = 0; i <= g_group.currentLevel; i++)
+   {
+      if(g_group.tickets[i] == closedTicket)
+      {
+         g_group.tickets[i] = 0;
+         Print("  📌 组内 L", i, " 已平(止损/追踪), 组继续运行");
+         g_lastCloseBarTime = iTime(_Symbol, _Period, 1); // 标记本Bar已平仓
+         break;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Tick事件 - 主逻辑                                                |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   //--- 1) 交易时间检查
+   if(!IsTradingTime()) return;
+
+   //--- 1b) 完成K线时间(用于每Bar一次入场锁定)
+   datetime completedBarTime = iTime(_Symbol, _Period, 1);
+
+   //--- 2) 每日权益更新
+   UpdateDailyEquity();
+
+   //--- 3) 每日亏损限制
+   if(InpUseDailyLoss && CheckDailyLossReached()) return;
+
+   //--- 4) 点差限制
+   if(InpUseSpreadLimit)
+   {
+      long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      if(spread > InpMaxSpread) return;
+   }
+
+   //--- 5) 更新趋势方向(金叉/死叉检测)
+   UpdateTrendDirection();
+
+   //--- 6) 吞没形态检测
+   int signalDir = CheckEngulfingEntry();
+
+   //--- 7) 单笔止损 + 追踪止损处理(必须在入场逻辑之前, 先处理已有持仓)
+   ProcessPositionSLTrailing();
+
+   //--- 诊断日志(每10秒一次)
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 10)
+   {
+      lastLog = TimeCurrent();
+      double close1 = iClose(_Symbol, _Period, 1);
+      double fastMA[1], slowMA[1];
+      CopyBuffer(g_hFastMA, 0, 1, 1, fastMA);
+      CopyBuffer(g_hSlowMA, 0, 1, 1, slowMA);
+      string engulfInfo = "";
+      if(IsBullishEngulfing(1)) engulfInfo = "多头吞没";
+      else if(IsBearishEngulfing(1)) engulfInfo = "空头吞没";
+      else engulfInfo = "无";
+      string trendStr = (g_trendDir == 1) ? "↑多头" : ((g_trendDir == -1) ? "↓空头" : "---");
+
+      Print(StringFormat("[诊断] Fast:%.2f Slow:%.2f 趋势:%s 吞没:%s 信号:%s 组层级:%d",
+            fastMA[0], slowMA[0], trendStr, engulfInfo,
+            signalDir == 1 ? "↑" : (signalDir == -1 ? "↓" : "无"),
+            g_group.active ? g_group.currentLevel : -1));
+   }
+
+   //============================================================
+   // 7) 组管理(止盈/止损/倍投) — 始终运行, 不受暂停影响
+   //============================================================
+   if(g_group.active)
+   {
+      if(!ValidateGroupPositions())
+      {
+         g_group.Reset();
+         return;
+      }
+
+      //--- 7a) 检查同组总利润是否达标
+      double totalProfit = GetGroupTotalProfit();
+      double totalVolume = GetGroupTotalVolume();
+      double tpDollars = PointsToDollars(InpTPPoints, totalVolume);
+      if(totalProfit >= tpDollars)
+      {
+         Print("✅ 同组总利润 $", DoubleToString(totalProfit, 2), " (", InpTPPoints, "点=$", DoubleToString(tpDollars, 2), ") 全部平仓!");
+         CloseAllGroupPositions();
+         g_lastCloseBarTime = completedBarTime;
+         OnGroupClosed(true);
+         g_group.Reset();
+         return;
+      }
+
+      //--- 7b) 阻断检查: 同Bar已平仓则不倍投
+      bool barClosed = (completedBarTime == g_lastCloseBarTime);
+
+      //--- 7c) 检查倍投
+      if(!barClosed && g_group.currentLevel < InpMaxDoubles &&
+         completedBarTime != g_lastDoubleBar)
+      {
+         int lastDir = g_group.dirs[g_group.currentLevel];
+         int desiredDir = -lastDir;
+         if(signalDir == desiredDir)
+         {
+            DoDoubleDown();
+            g_lastDoubleBar = completedBarTime;
+            return;
+         }
+      }
+   }
+   //============================================================
+   // 8) 无活跃组 → 初始入场
+   //============================================================
+   else
+   {
+      // 阻断检查
+      bool barClosed = (completedBarTime == g_lastCloseBarTime);
+      bool inCooldown = (InpUseCooldown && TimeCurrent() < g_cooldownUntil);
+
+      if(barClosed || inCooldown)
+      {
+         if(inCooldown)
+         {
+            if(TimeCurrent() - g_lastCooldownLog >= 60)
+            {
+               g_lastCooldownLog = TimeCurrent();
+               int remain = (int)(g_cooldownUntil - TimeCurrent()) / 60;
+               Print("⏳ 暂停中, 剩余约", remain, "分钟");
+            }
+         }
+         return;
+      }
+
+      // 吞没形态入场, 每Bar最多1次
+      if(signalDir != 0 && completedBarTime != g_lastEntryBar)
+      {
+         OpenInitialPosition(signalDir);
+         g_lastEntryBar = completedBarTime;
+      }
+   } // 结束else(无活跃组)
+
+} // 结束OnTick()
+
+//+------------------------------------------------------------------+
+//| 计算开仓手数                                                      |
+//+------------------------------------------------------------------+
+double CalcLot(int level)
+{
+   double baseLot;
+
+   if(InpUseFixedLot)
+   {
+      baseLot = InpFixedLot;
+   }
+   else
+   {
+      double equity = m_account.Equity();
+      baseLot = equity * InpRiskPercent / 10000.0;
+      if(baseLot < InpMinLot) baseLot = InpMinLot;
+   }
+
+   // 倍投: level 0=1x, 1=2x, 2=4x, 3=8x
+   double lot = baseLot * MathPow(2, level);
+
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step > 0) lot = MathRound(lot / step) * step;
+
+   if(lot < InpMinLot) lot = InpMinLot;
+   if(lot > InpMaxLot) lot = InpMaxLot;
+
+   // 保证金检查
+   double margin = 0;
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, SymbolInfoDouble(_Symbol, SYMBOL_ASK), margin))
+   {
+      double freeMargin = m_account.FreeMargin();
+      if(margin > freeMargin * 0.8)
+      {
+         lot = MathFloor(freeMargin * 0.7 / margin * lot / step) * step;
+         if(lot < InpMinLot) lot = InpMinLot;
+      }
+   }
+
+   return(lot);
+}
+
+//+------------------------------------------------------------------+
+//| 开初始仓                                                         |
+//+------------------------------------------------------------------+
+void OpenInitialPosition(int direction)
+{
+   double lot = CalcLot(0);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0) { Print("❌ 获取tickSize失败"); return; }
+   double price = 0.0;
+   double sl = 0.0, tp = 0.0;
+   int groupID = (int)TimeCurrent();
+
+   if(direction == 1) // Buy
+   {
+      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      sl = price - InpSLPoints * tickSize;       // 固定止损300点
+      tp = price + InpTPPoints * tickSize;       // 固定止盈660点
+      if(m_trade.Buy(lot, _Symbol, price, sl, tp,
+                     StringFormat("EMA55_E_%d_0_B", groupID)))
+      {
+         ulong ticket = m_trade.ResultOrder();
+         if(ticket > 0)
+         {
+            g_group.active = true;
+            g_group.groupID = groupID;
+            g_group.baseDir = 1;
+            g_group.currentLevel = 0;
+            g_group.tickets[0] = ticket;
+            g_group.lots[0] = lot;
+            g_group.dirs[0] = 1;
+            Print("🟢 开多 L0 单: 手数=", lot, " 票据=", ticket, " SL=", sl, " TP=", tp);
+         }
+      }
+   }
+   else // Sell (OpenInitialPosition)
+   {
+      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      sl = price + InpSLPoints * tickSize;
+      tp = price - InpTPPoints * tickSize;
+      if(m_trade.Sell(lot, _Symbol, price, sl, tp,
+                      StringFormat("EMA55_E_%d_0_S", groupID)))
+      {
+         ulong ticket = m_trade.ResultOrder();
+         if(ticket > 0)
+         {
+            g_group.active = true;
+            g_group.groupID = groupID;
+            g_group.baseDir = -1;
+            g_group.currentLevel = 0;
+            g_group.tickets[0] = ticket;
+            g_group.lots[0] = lot;
+            g_group.dirs[0] = -1;
+            Print("🔴 开空 L0 单: 手数=", lot, " 票据=", ticket, " SL=", sl, " TP=", tp);
+         }
+      }
+   }
+
+   if(!g_group.active)
+      Print("❌ 开仓失败: ", m_trade.ResultRetcodeDescription());
+}
+
+//+------------------------------------------------------------------+
+//| 倍投开仓                                                         |
+//+------------------------------------------------------------------+
+void DoDoubleDown()
+{
+   int nextLevel = g_group.currentLevel + 1;
+   double lot = CalcLot(nextLevel);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0) { Print("❌ 倍投获取tickSize失败"); return; }
+
+   int lastDir = g_group.dirs[g_group.currentLevel];
+   int newDir = -lastDir;
+
+   double price, sl, tp;
+   string cmt = StringFormat("EMA55_E_%d_%d_%s", g_group.groupID, nextLevel,
+                              newDir == 1 ? "B" : "S");
+
+   if(newDir == 1) // Buy
+   {
+      price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      sl = price - InpSLPoints * tickSize;
+      tp = price + InpTPPoints * tickSize;
+      if(m_trade.Buy(lot, _Symbol, price, sl, tp, cmt))
+      {
+         ulong ticket = m_trade.ResultOrder();
+         if(ticket > 0)
+         {
+            g_group.currentLevel = nextLevel;
+            g_group.tickets[nextLevel] = ticket;
+            g_group.lots[nextLevel] = lot;
+            g_group.dirs[nextLevel] = 1;
+            Print("🟢 倍投多 L", nextLevel, ": 手数=", lot, " 票据=", ticket, " SL=", sl, " TP=", tp);
+         }
+      }
+   }
+   else // Sell
+   {
+      price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      sl = price + InpSLPoints * tickSize;
+      tp = price - InpTPPoints * tickSize;
+      if(m_trade.Sell(lot, _Symbol, price, sl, tp, cmt))
+      {
+         ulong ticket = m_trade.ResultOrder();
+         if(ticket > 0)
+         {
+            g_group.currentLevel = nextLevel;
+            g_group.tickets[nextLevel] = ticket;
+            g_group.lots[nextLevel] = lot;
+            g_group.dirs[nextLevel] = -1;
+            Print("🔴 倍投空 L", nextLevel, ": 手数=", lot, " 票据=", ticket, " SL=", sl, " TP=", tp);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 获取同组总利润                                                    |
+//+------------------------------------------------------------------+
+double GetGroupTotalProfit()
+{
+   double total = 0.0;
+   for(int i = 0; i <= g_group.currentLevel; i++)
+   {
+      if(g_group.tickets[i] > 0 && PositionSelectByTicket(g_group.tickets[i]))
+         total += PositionGetDouble(POSITION_PROFIT);
+   }
+   return(total);
+}
+
+//+------------------------------------------------------------------+
+//| 平仓同组所有持仓                                                  |
+//+------------------------------------------------------------------+
+void CloseAllGroupPositions()
+{
+   for(int i = g_group.currentLevel; i >= 0; i--)
+   {
+      if(g_group.tickets[i] > 0 && PositionSelectByTicket(g_group.tickets[i]))
+      {
+         if(m_trade.PositionClose(g_group.tickets[i]))
+            Print("  关闭 L", i);
+         else
+            Print("  ⚠️ 关闭 L", i, " 失败: ", m_trade.ResultRetcodeDescription());
+         g_group.tickets[i] = 0;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 验证组内持仓是否仍然存活                                          |
+//+------------------------------------------------------------------+
+bool ValidateGroupPositions()
+{
+   int aliveCount = 0;
+   for(int i = 0; i <= g_group.currentLevel; i++)
+   {
+      if(g_group.tickets[i] > 0)
+      {
+         if(!PositionSelectByTicket(g_group.tickets[i]))
+         {
+            Print("⚠️ L", i, " 票据=", g_group.tickets[i], " 持仓已不存在");
+            g_group.tickets[i] = 0;
+            continue;
+         }
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+         {
+            Print("⚠️ L", i, " 魔法编号不匹配");
+            g_group.tickets[i] = 0;
+            continue;
+         }
+         aliveCount++;
+      }
+   }
+
+   // 组内已无存活持仓 → 自动重置(算作亏损)
+   if(aliveCount == 0 && g_group.active)
+   {
+      Print("📌 组内所有持仓已关闭, 自动重置组状态");
+      g_lastCloseBarTime = iTime(_Symbol, _Period, 1);
+      OnGroupClosed(false); // 亏损→递增连续亏损
+      g_group.Reset();
+      return(false);
+   }
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+//| 从现有持仓重建组状态                                              |
+//+------------------------------------------------------------------+
+void RebuildGroupFromPositions()
+{
+   g_group.Reset();
+
+   int highestGroupID = -1;
+   TempPos temp[4];
+   int tempCount = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!PositionGetTicket(i)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      string cmt = PositionGetString(POSITION_COMMENT);
+      if(StringFind(cmt, "EMA55_E_") != 0) continue; // 格式: EMA55_E_{groupID}_{level}_{B/S}
+
+      string parts[];
+      int cnt = StringSplit(cmt, '_', parts);
+      if(cnt < 5) continue;
+
+      int groupID = (int)StringToInteger(parts[2]);
+      int level   = (int)StringToInteger(parts[3]);
+      int dir     = (parts[4] == "B") ? 1 : -1;
+
+      if(groupID > highestGroupID) { highestGroupID = groupID; tempCount = 0; }
+      if(groupID == highestGroupID && level >= 0 && level <= 3)
+      {
+         temp[tempCount].ticket = PositionGetTicket(i);
+         temp[tempCount].level  = level;
+         temp[tempCount].dir    = dir;
+         temp[tempCount].lot    = PositionGetDouble(POSITION_VOLUME);
+         tempCount++;
+      }
+   }
+
+   if(tempCount == 0) return;
+
+   g_group.active = true;
+   g_group.groupID = highestGroupID;
+   g_lastEntryBar  = iTime(_Symbol, _Period, 1);
+   g_lastDoubleBar = iTime(_Symbol, _Period, 1);
+
+   for(int i = 0; i < tempCount; i++)
+   {
+      int lvl = temp[i].level;
+      g_group.tickets[lvl] = temp[i].ticket;
+      g_group.lots[lvl]    = temp[i].lot;
+      g_group.dirs[lvl]    = temp[i].dir;
+      if(lvl > g_group.currentLevel) g_group.currentLevel = lvl;
+   }
+   g_group.baseDir = g_group.dirs[0];
+
+   Print("🔄 已恢复组状态: GroupID=", g_group.groupID,
+         " 首单=", (g_group.baseDir == 1 ? "多" : "空"),
+         " 层级=", g_group.currentLevel);
+}
+
+//+------------------------------------------------------------------+
+//| 交易时间检查(北京→服务器)                                        |
+//+------------------------------------------------------------------+
+bool IsTradingTime()
+{
+   datetime serverTime = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(serverTime, dt);
+
+   int bjHour = dt.hour + InpGMTOffset;
+   int bjMin  = dt.min;
+   if(bjHour >= 24) bjHour -= 24;
+
+   int bjMinutes = bjHour * 60 + bjMin;
+   int startMin  = InpStartHour * 60 + InpStartMin;
+   int endMin    = InpEndHour * 60 + InpEndMin;
+
+   if(endMin <= startMin) endMin += 24 * 60;
+   if(bjMinutes < startMin) bjMinutes += 24 * 60;
+
+   return(bjMinutes >= startMin && bjMinutes <= endMin);
+}
+
+//+------------------------------------------------------------------+
+//| 更新日初权益                                                      |
+//+------------------------------------------------------------------+
+void UpdateDailyEquity()
+{
+   MqlDateTime today;
+   TimeToStruct(TimeCurrent(), today);
+   today.hour = 0; today.min = 0; today.sec = 0;
+   datetime dayStart = StructToTime(today);
+
+   if(dayStart != g_lastDayCheck)
+   {
+      g_lastDayCheck = dayStart;
+      g_dailyEquity = m_account.Equity();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 当日亏损是否达上限                                                |
+//+------------------------------------------------------------------+
+bool CheckDailyLossReached()
+{
+   if(g_dailyEquity <= 0) return(false);
+
+   double lossPct = (g_dailyEquity - m_account.Equity()) / g_dailyEquity * 100.0;
+   static bool warned = false;
+
+   if(lossPct >= InpDailyLossPct)
+   {
+      if(!warned)
+      {
+         Print("🚫 当日亏损 ", DoubleToString(lossPct, 1), "% (上限",
+               InpDailyLossPct, "%), 禁止开仓!");
+         warned = true;
+      }
+      return(true);
+   }
+   if(lossPct < InpDailyLossPct * 0.8) warned = false;
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+//| 打印组信息                                                        |
+//+------------------------------------------------------------------+
+void PrintGroupInfo()
+{
+   if(!g_group.active) { Print("当前无活跃交易组"); return; }
+
+   string info = StringFormat("📊 组 #%d | 首单:%s | 层级:%d | 总利润:$%.2f",
+         g_group.groupID,
+         g_group.baseDir == 1 ? "多" : "空",
+         g_group.currentLevel,
+         GetGroupTotalProfit());
+
+   for(int i = 0; i <= g_group.currentLevel; i++)
+   {
+      info += StringFormat("\n  L%d: 票据=%llu 手数=%.2f %s",
+            i, g_group.tickets[i], g_group.lots[i],
+            g_group.dirs[i] == 1 ? "多" : "空");
+   }
+   Print(info);
+}
+
+//+------------------------------------------------------------------+
+//| Chart事件                                                         |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id == CHARTEVENT_CLICK) PrintGroupInfo();
+}
+//+------------------------------------------------------------------+
