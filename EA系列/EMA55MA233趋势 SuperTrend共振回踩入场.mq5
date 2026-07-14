@@ -22,7 +22,7 @@
 //|    当日最大亏损限制,点差限制                                       |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "1.20"
+#property version   "1.21"
 #property description "M1 EMA55/MA233金叉死叉趋势 + M1 SuperTrend共振回踩入场"
 #property description "M1:EMA55上穿MA233=金叉多头,下穿MA233=死叉空头"
 #property description "SuperTrend与MA交叉趋势共振+回踩ST线$0.5内开仓"
@@ -67,11 +67,15 @@ input double  InpDailyLossPct    = 5.0;             // 当日最大亏损(%)
 input bool    InpUseSpreadLimit  = true;            // 启用点差限制
 input int     InpMaxSpread       = 50;              // 最大允许点差
 
-input group   "=== ★ 追踪止损 ==="
-input bool    InpUseTrailing     = true;            // 启用追踪止损
-input int     InpTrailActivate   = 200;             // 追踪激活点数
-input int     InpTrailDistance   = 700;             // 追踪距离点数(700点保本)
-input int     InpTrailCooldownMs = 1000;            // 追踪止损失败重试冷却(毫秒)
+input group   "=== ★ 追踪方式A: 渐进式(持续追踪SL,与B互斥) ==="
+input bool    InpUseTrailA        = false;           // 启用追踪A(渐进式,与B互斥)
+input int     InpTrailAActivate   = 20;              // A: 追踪激活利润点数(≥此值开始追踪)
+input int     InpTrailABreakeven  = 320;             // A: 保本点数(SL移入场价±2点)
+
+input group   "=== ★ 追踪方式B: 一次性保本(与A互斥) ==="
+input bool    InpUseTrailB        = true;            // 启用追踪B(一次性保本,与A互斥)
+input int     InpTrailBTrigger    = 320;             // B: 触发保本的利润点数
+input int     InpTrailBProtect    = 20;              // B: 保护利润(SL移入场价±此点数)
 
 //+------------------------------------------------------------------+
 //| 全局变量                                                         |
@@ -106,10 +110,10 @@ datetime    g_entryBarTime = 0;           // 入场时的K线时间
 double      g_pt         = 0.0;           // 点值
 int         g_dig        = 0;             // 小数位数
 
-//--- 追踪止损状态(防高频修改)
-ulong       g_lastTrailTicket = 0;        // 上次修改的持仓ticket
-datetime    g_lastTrailTime   = 0;        // 上次修改时间
-int         g_trailRetryCount = 0;        // 连续失败次数
+//--- 追踪止损状态(A/B模式共用)
+bool        g_trailBLocked  = false;        // B模式锁定标记(SL触发后不再修改)
+ulong       g_trailTicket   = 0;            // 当前追踪的持仓ticket
+int         g_trailFailCnt  = 0;            // 连续失败次数
 
 //--- 定时器
 int         g_timerId    = -1;            // 定时器ID
@@ -160,6 +164,12 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   //--- 追踪模式互斥检查: A与B同时启用时A优先
+   if(InpUseTrailA && InpUseTrailB)
+   {
+      Print("⚠️ 追踪A和B同时启用,按A优先处理(渐进式)");
+   }
+
    //--- 创建M1均线指标(用于金叉死叉趋势判断)
    g_hFastMA = iMA(_Symbol, PERIOD_M1, InpFastMAPeriod, 0, InpFastMAMethod, InpMAApplied);
    g_hSlowMA = iMA(_Symbol, PERIOD_M1, InpSlowMAPeriod, 0, InpSlowMAMethod, InpMAApplied);
@@ -207,7 +217,7 @@ int OnInit()
    Print("║ 止损:       ", InpStopLoss, "点 (", InpStopLoss*10, "美分)");
    Print("║ 止盈:       ", InpTakeProfit, "点 (", InpTakeProfit*10, "美分)");
    Print("║ 触碰距离:   ", InpTouchDistance, " USD");
-   Print("║ 追踪冷却:   ", InpTrailCooldownMs, "ms");
+   Print("║ 追踪模式:   ", InpUseTrailA ? "A-渐进式" : InpUseTrailB ? "B-一次性保本" : "关闭");
    Print("╚══════════════════════════════════════════════╝");
 
    return INIT_SUCCEEDED;
@@ -406,8 +416,9 @@ void ResetDay()
    g_dayNum   = dt.day_of_year;
    g_dayBal   = AccountInfoDouble(ACCOUNT_BALANCE);
    g_dayLimit = false;
-   g_trailRetryCount = 0;
-   g_lastTrailTicket = 0;
+   g_trailFailCnt = 0;
+   g_trailBLocked = false;
+   g_trailTicket  = 0;
 
    Print("📅 新交易日初始化 余额=", DoubleToString(g_dayBal, 2));
 }
@@ -847,6 +858,9 @@ void OpenBuy(double lot)
             " 入场=", DoubleToString(ask, g_dig),
             " SL=", DoubleToString(sl, g_dig),
             " TP=", DoubleToString(tp, g_dig));
+      g_trailBLocked = false;   // 新仓位,重置B模式锁定
+      g_trailTicket  = 0;       // 重置追踪状态
+      g_trailFailCnt = 0;
    }
    else
    {
@@ -885,6 +899,9 @@ void OpenSell(double lot)
             " 入场=", DoubleToString(bid, g_dig),
             " SL=", DoubleToString(sl, g_dig),
             " TP=", DoubleToString(tp, g_dig));
+      g_trailBLocked = false;   // 新仓位,重置B模式锁定
+      g_trailTicket  = 0;       // 重置追踪状态
+      g_trailFailCnt = 0;
    }
    else
    {
@@ -1013,37 +1030,37 @@ double CalcLot()
 }
 
 //+------------------------------------------------------------------+
-//| 追踪止损                                                         |
+//| 追踪止损(支持A/B双模式)                                           |
 //|                                                                  |
-//|  规则:                                                            |
-//|  1. 利润达到200点时激活追踪止损                                   |
-//|  2. 追踪距离700点                                                |
-//|  3. 当利润达到700点时,止损恰好移动到开仓位(保本)                  |
-//|  4. 止盈位不动                                                    |
+//|  模式A(渐进式):                                                    |
+//|    Phase 1: 利润≥InpTrailABreakeven → SL移入场价±2点(保本锁死)    |
+//|    Phase 2: 利润≥InpTrailAActivate且<保本 → SL紧跟当前价±1点     |
+//|                                                                  |
+//|  模式B(一次性保本):                                                |
+//|    利润≥InpTrailBTrigger → SL一次移到入场价±InpTrailBProtect点    |
+//|    触发后锁死不再修改                                               |
+//|                                                                  |
+//|  互斥: A与B同时启用时A优先(在OnInit中已检查)                      |
 //+------------------------------------------------------------------+
 void CheckTrail()
 {
-   if(!InpUseTrailing) return;
+   //--- 判断启用哪种模式
+   bool useA = InpUseTrailA;
+   bool useB = InpUseTrailB && !InpUseTrailA; // A优先,只有A关闭且B开启时才用B
+   if(!useA && !useB) return;
 
    ulong ticket = GetMyPosTicket();
    if(ticket == 0)
    {
-      g_trailRetryCount = 0;
+      g_trailFailCnt = 0;
       return;
    }
 
-   if(ticket == g_lastTrailTicket && g_trailRetryCount > 5)
-   {
+   //--- 失败达到上限则跳过(等待下次OnTimer/Tick重试)
+   if(ticket == g_trailTicket && g_trailFailCnt > 5)
       return;
-   }
 
-   if(ticket == g_lastTrailTicket && g_lastTrailTime > 0)
-   {
-      datetime now = TimeCurrent();
-      if((now - g_lastTrailTime) * 1000 < InpTrailCooldownMs)
-         return;
-   }
-
+   //--- 获取持仓信息
    if(!PositionSelectByTicket(ticket)) return;
 
    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
@@ -1051,73 +1068,128 @@ void CheckTrail()
    double currSL   = PositionGetDouble(POSITION_SL);
    double currTP   = PositionGetDouble(POSITION_TP);
 
-   bool modified = false;
+   //--- 计算当前利润(点数)
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double profitPoints = (posType == POSITION_TYPE_BUY)
+                         ? (bid - openPrice) / g_pt
+                         : (openPrice - ask) / g_pt;
 
-   if(posType == POSITION_TYPE_BUY)
+   if(profitPoints <= 0) return;
+
+   //===============================================================
+   // 模式B: 一次性保本(触发后锁死)
+   //===============================================================
+   if(useB)
    {
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double profitPoints = (bid - openPrice) / g_pt;
+      // B模式已触发锁定 → 不再修改
+      if(g_trailBLocked) return;
 
-      if(profitPoints >= InpTrailActivate)
+      // 利润达到触发线 → 一次移动到入场价±保护点数,锁死
+      if(profitPoints >= InpTrailBTrigger)
       {
-         double newSL = NormalizeDouble(bid - InpTrailDistance * g_pt, g_dig);
-         double origSL = NormalizeDouble(openPrice - InpStopLoss * g_pt, g_dig);
+         double newSL;
+         if(posType == POSITION_TYPE_BUY)
+            newSL = NormalizeDouble(openPrice + InpTrailBProtect * g_pt, g_dig);
+         else
+            newSL = NormalizeDouble(openPrice - InpTrailBProtect * g_pt, g_dig);
 
-         if(newSL > currSL && newSL > origSL)
+         // 只有当新SL比当前SL更有利时才修改
+         bool needMove = (currSL == 0) ||
+                         (posType == POSITION_TYPE_BUY && newSL > currSL) ||
+                         (posType == POSITION_TYPE_SELL && newSL < currSL);
+         if(needMove)
          {
             if(m_trade.PositionModify(ticket, newSL, currTP))
             {
-               Print("📈 多单追踪止损: 利润=", DoubleToString(profitPoints, 0),
+               Print("🔒 追踪B(一次性保本): 利润=", DoubleToString(profitPoints, 0),
                      "点 SL:", DoubleToString(currSL, g_dig),
-                     "→", DoubleToString(newSL, g_dig));
-               g_lastTrailTicket = ticket;
-               g_lastTrailTime   = TimeCurrent();
-               g_trailRetryCount = 0;
-               modified = true;
+                     "→", DoubleToString(newSL, g_dig),
+                     " 已锁定不再修改");
+               g_trailBLocked = true;
+               g_trailTicket  = ticket;
+               g_trailFailCnt = 0;
+               return;
             }
             else
             {
-               g_trailRetryCount++;
-               g_lastTrailTime = TimeCurrent();
+               g_trailFailCnt++;
+               return;
             }
          }
       }
+      // 利润未达标,不做任何操作
+      return;
    }
-   else if(posType == POSITION_TYPE_SELL)
+
+   //===============================================================
+   // 模式A: 渐进式(持续追踪SL)
+   //===============================================================
+   if(useA)
    {
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double profitPoints = (openPrice - ask) / g_pt;
-
-      if(profitPoints >= InpTrailActivate)
+      //--- Phase 1: 保本(利润≥保本点,直接移到入场价±2点,不再追踪)
+      if(profitPoints >= InpTrailABreakeven)
       {
-         double newSL = NormalizeDouble(ask + InpTrailDistance * g_pt, g_dig);
-         double origSL = NormalizeDouble(openPrice + InpStopLoss * g_pt, g_dig);
+         double newSL;
+         if(posType == POSITION_TYPE_BUY)
+            newSL = NormalizeDouble(openPrice + 2 * g_pt, g_dig);
+         else
+            newSL = NormalizeDouble(openPrice - 2 * g_pt, g_dig);
 
-         bool slValid = (currSL == 0) || (newSL < currSL);
-         if(slValid && newSL < origSL)
+         // 只有新SL更有利时才修改
+         bool needMove = (currSL == 0) ||
+                         (posType == POSITION_TYPE_BUY && newSL > currSL) ||
+                         (posType == POSITION_TYPE_SELL && newSL < currSL);
+         if(needMove)
          {
             if(m_trade.PositionModify(ticket, newSL, currTP))
             {
-               Print("📉 空单追踪止损: 利润=", DoubleToString(profitPoints, 0),
+               Print("🔒 追踪A(保本): 利润=", DoubleToString(profitPoints, 0),
                      "点 SL:", DoubleToString(currSL, g_dig),
                      "→", DoubleToString(newSL, g_dig));
-               g_lastTrailTicket = ticket;
-               g_lastTrailTime   = TimeCurrent();
-               g_trailRetryCount = 0;
-               modified = true;
+               g_trailTicket  = ticket;
+               g_trailFailCnt = 0;
+               return;
             }
             else
             {
-               g_trailRetryCount++;
-               g_lastTrailTime = TimeCurrent();
+               g_trailFailCnt++;
+               return;
             }
          }
+         return;
       }
-   }
 
-   if(!modified && ticket == g_lastTrailTicket)
-   {
-      g_lastTrailTime = TimeCurrent();
+      //--- Phase 2: 渐进追踪(利润≥激活点且<保本点)
+      if(profitPoints >= InpTrailAActivate)
+      {
+         double newSL;
+         if(posType == POSITION_TYPE_BUY)
+            newSL = NormalizeDouble(bid - 1 * g_pt, g_dig);
+         else
+            newSL = NormalizeDouble(ask + 1 * g_pt, g_dig);
+
+         // 只有新SL更有利时才修改
+         bool needMove = (currSL == 0) ||
+                         (posType == POSITION_TYPE_BUY && newSL > currSL) ||
+                         (posType == POSITION_TYPE_SELL && newSL < currSL);
+         if(needMove)
+         {
+            if(m_trade.PositionModify(ticket, newSL, currTP))
+            {
+               Print("📈 追踪A(渐进): 利润=", DoubleToString(profitPoints, 0),
+                     "点 SL:", DoubleToString(currSL, g_dig),
+                     "→", DoubleToString(newSL, g_dig));
+               g_trailTicket  = ticket;
+               g_trailFailCnt = 0;
+            }
+            else
+            {
+               g_trailFailCnt++;
+            }
+         }
+         return;
+      }
    }
 }
 //+------------------------------------------------------------------+
