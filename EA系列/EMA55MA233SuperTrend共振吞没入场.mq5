@@ -9,8 +9,8 @@
 //|  4. 连续亏损N次则暂停M分钟                                         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "4.07"
-#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪(7项稳定性修复)"
+#property version   "4.09"
+#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪(9项稳定性修复)"
 #property description "① EMA55/MA233金叉=多头 死叉=空头 均线趋势"
 #property description "② SuperTrend同向确认, 吞没形态共振入场"
 #property description "③ 固定止损止盈(带开关), 追踪A/B二选一: A=渐进式 B=一次性保本"
@@ -99,6 +99,7 @@ int           g_stDir     = 0;  // SuperTrend方向: 1=多, -1=空
 //--- 每Bar入场锁定
 datetime      g_lastEntryBar  = 0;
 datetime      g_lastCloseBarTime = 0;
+int           g_lastCloseDirection = 0;  // 平仓方向: 1=多, -1=空(仅同方向才保护)
 
 //--- 连续亏损暂停
 int           g_consecLossCount = 0;
@@ -189,7 +190,7 @@ int OnInit()
 
    EventSetTimer(1);
 
-   Print("✅ EMA55MA233_ST_吞没 EA v4.07 启动");
+   Print("✅ EMA55MA233_ST_吞没 EA v4.09 启动");
    Print("   品种:", _Symbol, " 周期:", EnumToString(_Period));
    Print("   MA:", InpFastMAPeriod, "/", InpSlowMAPeriod, " ST周期:", InpSTPeriod, " 倍率:", InpSTMultiplier);
    Print("   初始趋势: MA=", (g_trendDir == 1 ? "多头" : "空头"),
@@ -802,14 +803,17 @@ void OnTick()
       return;
    }
 
-   // 同Bar平仓保护
-   if(completedBarTime == g_lastCloseBarTime) return;
+   // 同Bar平仓保护(仅同方向禁止, 反向信号(反转)可以入场)
+   if(completedBarTime == g_lastCloseBarTime && signalDir == g_lastCloseDirection)
+   {
+      return;
+   }
 
    // 三共振入场
    if(signalDir != 0 && completedBarTime != g_lastEntryBar)
    {
-      OpenPosition(signalDir);
-      g_lastEntryBar = completedBarTime;
+      if(OpenPosition(signalDir))
+         g_lastEntryBar = completedBarTime;
    }
 }
 
@@ -847,13 +851,13 @@ double CalcLot()
 }
 
 //+------------------------------------------------------------------+
-//| 开仓                                                              |
+//| 开仓(返回true表示开仓成功)                                        |
 //+------------------------------------------------------------------+
-void OpenPosition(int direction)
+bool OpenPosition(int direction)
 {
    double lot = CalcLot();
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tickSize <= 0) { Print("❌ 获取tickSize失败"); return; }
+   if(tickSize <= 0) { Print("❌ 获取tickSize失败"); return(false); }
 
    double price = 0.0;
    double sl = 0.0, tp = 0.0;
@@ -868,6 +872,7 @@ void OpenPosition(int direction)
       {
          Print("🟢 开多 手数=", lot, " SL=", (InpUseStopLoss ? DoubleToString(sl,2) : "关"),
                " TP=", (InpUseTakeProfit ? DoubleToString(tp,2) : "关"));
+         return(true);
       }
    }
    else // Sell
@@ -879,8 +884,11 @@ void OpenPosition(int direction)
       {
          Print("🔴 开空 手数=", lot, " SL=", (InpUseStopLoss ? DoubleToString(sl,2) : "关"),
                " TP=", (InpUseTakeProfit ? DoubleToString(tp,2) : "关"));
+         return(true);
       }
    }
+   Print("❌ 开仓失败 方向=", direction == 1 ? "多" : "空");
+   return(false);
 }
 
 //+------------------------------------------------------------------+
@@ -988,12 +996,17 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    // 只处理平仓(DEAL_ENTRY_OUT), 忽略开仓
    if(entry != DEAL_ENTRY_OUT) return;
 
-   // --- 1) 同Bar平仓保护 ---
+   // 平仓后重置入场锁定, 允许反转信号同Bar入场
+   g_lastEntryBar = 0;
+
+   // --- 1) 同Bar平仓保护(记录平仓方向) ---
    datetime closeBar = iTime(_Symbol, _Period, 1);
    if(closeBar > g_lastCloseBarTime)
    {
       g_lastCloseBarTime = closeBar;
-      Print("📌 平仓检测 -> 同Bar保护 barTime=", closeBar);
+      // DEAL_TYPE_BUY=平空, DEAL_TYPE_SELL=平多
+      g_lastCloseDirection = (dealType == DEAL_TYPE_BUY) ? -1 : 1;
+      Print("📌 平仓检测 -> 同Bar保护 barTime=", closeBar, " 方向=", (g_lastCloseDirection == 1 ? "多" : "空"));
    }
 
    // --- 2) 连续亏损暂停 ---
