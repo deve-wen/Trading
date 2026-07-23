@@ -9,8 +9,8 @@
 //|  4. 连续亏损N次则暂停M分钟                                         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "4.06"
-#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪(6项稳定性修复)"
+#property version   "4.07"
+#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪(7项稳定性修复)"
 #property description "① EMA55/MA233金叉=多头 死叉=空头 均线趋势"
 #property description "② SuperTrend同向确认, 吞没形态共振入场"
 #property description "③ 固定止损止盈(带开关), 追踪A/B二选一: A=渐进式 B=一次性保本"
@@ -36,6 +36,7 @@ input double  InpSTMultiplier    = 3.0;             // SuperTrend倍数
 
 input group   "=== ★ 开仓参数 ==="
 input int     InpMinPullback     = 2;               // 最小连续回调K线数(吞没前) >=2
+input int     InpMinEngulfBody   = 15;              // 最小吞没实体点数(过滤微小吞没)
 
 input group   "=== ★ 交易时间(北京时间) ==="
 input int     InpGMTOffset       = 5;               // 服务器比北京晚N小时(MT5=5)
@@ -188,12 +189,13 @@ int OnInit()
 
    EventSetTimer(1);
 
-   Print("✅ EMA55MA233_ST_吞没 EA v4.06 启动");
+   Print("✅ EMA55MA233_ST_吞没 EA v4.07 启动");
    Print("   品种:", _Symbol, " 周期:", EnumToString(_Period));
    Print("   MA:", InpFastMAPeriod, "/", InpSlowMAPeriod, " ST周期:", InpSTPeriod, " 倍率:", InpSTMultiplier);
    Print("   初始趋势: MA=", (g_trendDir == 1 ? "多头" : "空头"),
          " ST=", (g_stDir == 1 ? "多头" : "空头"));
    Print("   SL:", InpSLPoints, "点 TP:", InpTPPoints, "点");
+   Print("   吞没参数: 最小回调=", InpMinPullback, "根 最小实体=", InpMinEngulfBody, "点");
    if(InpUseTrailA)
       Print("   追踪方式A: 渐进式 (激活=", InpTrailA_Start, "点 保本=", InpTrailA_Breakeven, "点)");
    else if(InpUseTrailB)
@@ -311,24 +313,57 @@ void UpdateSuperTrend()
 }
 
 //+------------------------------------------------------------------+
-//| 吞没形态检测                                                      |
+//| 吞没形态检测(增强版)                                              |
+//| 多头吞没: N根阴线回调 → 阳线实体覆盖最后一根阴线实体              |
+//| 空头吞没: N根阳线反弹 → 阴线实体覆盖最后一根阳线实体              |
+//| 增强检查: 吞没实体≥被吞没实体 + 回调K线影线<实体                 |
 //+------------------------------------------------------------------+
 bool IsBullishEngulfing(int idx)
 {
    double open2  = iOpen(_Symbol, _Period, idx);
    double close2 = iClose(_Symbol, _Period, idx);
+   double high2  = iHigh(_Symbol, _Period, idx);
+   double low2   = iLow(_Symbol, _Period, idx);
    double open1  = iOpen(_Symbol, _Period, idx + 1);
    double close1 = iClose(_Symbol, _Period, idx + 1);
+   double high1  = iHigh(_Symbol, _Period, idx + 1);
+   double low1   = iLow(_Symbol, _Period, idx + 1);
 
+   double engulfBody   = fabs(close2 - open2);   // 吞没K线实体
+   double engulfedBody = fabs(close1 - open1);   // 被吞没K线实体
+
+   // --- 检查1: 前一根必须是阴线(回调) ---
    if(close1 >= open1) return(false);
+
+   // --- 检查2: 本根必须是阳线(吞没) ---
    if(close2 <= open2) return(false);
+
+   // --- 检查3: 实体覆盖(阳线实体完全覆盖阴线实体) ---
    if(!(open2 <= close1 && close2 >= open1)) return(false);
 
+   // --- 检查4: 吞没实体 >= 被吞没实体(确保是真正的大阳线吞没) ---
+   if(engulfBody < engulfedBody) return(false);
+
+   // --- 检查5: 最小吞没实体点数 ---
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize > 0 && engulfBody / tickSize < InpMinEngulfBody) return(false);
+
+   // --- 检查6: N根回调K线必须都是阴线且影线＜实体(干净回调) ---
    for(int k = 1; k <= InpMinPullback; k++)
    {
       double o = iOpen(_Symbol, _Period, idx + k);
       double c = iClose(_Symbol, _Period, idx + k);
-      if(c >= o) return(false);
+      double h = iHigh(_Symbol, _Period, idx + k);
+      double l = iLow(_Symbol, _Period, idx + k);
+
+      if(c >= o) return(false);  // 必须阴线
+
+      double body = fabs(c - o);
+      if(body <= 0) return(false);
+      double upperShadow = h - fmax(o, c);
+      double lowerShadow = fmin(o, c) - l;
+      // 影线不能超过实体
+      if(upperShadow > body || lowerShadow > body) return(false);
    }
    return(true);
 }
@@ -337,24 +372,54 @@ bool IsBearishEngulfing(int idx)
 {
    double open2  = iOpen(_Symbol, _Period, idx);
    double close2 = iClose(_Symbol, _Period, idx);
+   double high2  = iHigh(_Symbol, _Period, idx);
+   double low2   = iLow(_Symbol, _Period, idx);
    double open1  = iOpen(_Symbol, _Period, idx + 1);
    double close1 = iClose(_Symbol, _Period, idx + 1);
+   double high1  = iHigh(_Symbol, _Period, idx + 1);
+   double low1   = iLow(_Symbol, _Period, idx + 1);
 
+   double engulfBody   = fabs(close2 - open2);
+   double engulfedBody = fabs(close1 - open1);
+
+   // --- 检查1: 前一根必须是阳线(反弹) ---
    if(close1 <= open1) return(false);
+
+   // --- 检查2: 本根必须是阴线(吞没) ---
    if(close2 >= open2) return(false);
+
+   // --- 检查3: 实体覆盖(阴线实体完全覆盖阳线实体) ---
    if(!(open2 >= close1 && close2 <= open1)) return(false);
 
+   // --- 检查4: 吞没实体 >= 被吞没实体(确保是真正的大阴线吞没) ---
+   if(engulfBody < engulfedBody) return(false);
+
+   // --- 检查5: 最小吞没实体点数 ---
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize > 0 && engulfBody / tickSize < InpMinEngulfBody) return(false);
+
+   // --- 检查6: N根回调K线必须都是阳线且影线＜实体(干净反弹) ---
    for(int k = 1; k <= InpMinPullback; k++)
    {
       double o = iOpen(_Symbol, _Period, idx + k);
       double c = iClose(_Symbol, _Period, idx + k);
-      if(c <= o) return(false);
+      double h = iHigh(_Symbol, _Period, idx + k);
+      double l = iLow(_Symbol, _Period, idx + k);
+
+      if(c <= o) return(false);  // 必须阳线
+
+      double body = fabs(c - o);
+      if(body <= 0) return(false);
+      double upperShadow = h - fmax(o, c);
+      double lowerShadow = fmin(o, c) - l;
+      // 影线不能超过实体
+      if(upperShadow > body || lowerShadow > body) return(false);
    }
    return(true);
 }
 
 //+------------------------------------------------------------------+
-//| 三共振入场检测                                                    |
+//| 三共振入场检测(带诊断日志)                                        |
 //|  MA趋势 + SuperTrend(可选) + 吞没形态 → 返回开仓方向              |
 //+------------------------------------------------------------------+
 int CheckEngulfingEntry()
@@ -366,8 +431,36 @@ int CheckEngulfingEntry()
    if(InpUseSuperTrend && g_stDir != g_trendDir) return(0);
 
    // --- 条件3: 吞没形态 ---
-   if(g_trendDir == 1 && IsBullishEngulfing(1)) return(1);
-   if(g_trendDir == -1 && IsBearishEngulfing(1)) return(-1);
+   bool bullish = IsBullishEngulfing(1);
+   bool bearish = IsBearishEngulfing(1);
+
+   // --- 诊断日志(每10秒打印一次检测详情) ---
+   static datetime lastLog = 0;
+   if(TimeCurrent() - lastLog >= 10)
+   {
+      lastLog = TimeCurrent();
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      if(g_trendDir == 1 || g_trendDir == -1)
+      {
+         // 读取关键Bar数据用于诊断
+         double o1 = iOpen(_Symbol, _Period, 1);
+         double c1 = iClose(_Symbol, _Period, 1);
+         double o2 = iOpen(_Symbol, _Period, 2);
+         double c2 = iClose(_Symbol, _Period, 2);
+         double o3 = iOpen(_Symbol, _Period, 3);
+         double c3 = iClose(_Symbol, _Period, 3);
+         string dirStr = (g_trendDir == 1) ? "多" : "空";
+         Print(StringFormat("[入场诊断] 方向:%s 趋势:MA=%s ST=%s Bar1(O%.2f C%.2f) Bar2(O%.2f C%.2f) Bar3(O%.2f C%.2f) 吞多:%d 吞空:%d",
+               dirStr,
+               g_trendDir == 1 ? "↑" : "↓",
+               g_stDir == 1 ? "↑" : "↓",
+               o1, c1, o2, c2, o3, c3,
+               bullish ? 1 : 0, bearish ? 1 : 0));
+      }
+   }
+
+   if(g_trendDir == 1 && bullish) return(1);
+   if(g_trendDir == -1 && bearish) return(-1);
 
    return(0);
 }
@@ -684,14 +777,11 @@ void OnTick()
       double fastMA[1], slowMA[1];
       CopyBuffer(g_hFastMA, 0, 1, 1, fastMA);
       CopyBuffer(g_hSlowMA, 0, 1, 1, slowMA);
-      string engulfInfo = "";
-      if(IsBullishEngulfing(1)) engulfInfo = "多头吞没";
-      else if(IsBearishEngulfing(1)) engulfInfo = "空头吞没";
-      else engulfInfo = "无";
+      string engulfInfo = (signalDir == 1) ? "多头吞没" : ((signalDir == -1) ? "空头吞没" : "无");
       string maStr = (g_trendDir == 1) ? "↑多" : ((g_trendDir == -1) ? "↓空" : "---");
       string stStr  = (g_stDir == 1) ? "↑多" : ((g_stDir == -1) ? "↓空" : "---");
 
-      Print(StringFormat("[诊断] Fast:%.2f Slow:%.2f MA:%s ST:%s 吞没:%s 信号:%s 持仓:%d",
+      Print(StringFormat("[诊断] Fast:%.2f Slow:%.2f MA:%s ST:%s 吞没:%s 持仓:%d",
             fastMA[0], slowMA[0], maStr, stStr, engulfInfo,
             signalDir == 1 ? "↑" : (signalDir == -1 ? "↓" : "无"),
             PositionsTotal()));
