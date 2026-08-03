@@ -9,8 +9,8 @@
 //|  4. 连续亏损N次则暂停M分钟                                         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "4.06"
-#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪(6项稳定性修复)"
+#property version   "4.12"
+#property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪"
 #property description "① EMA55/MA233金叉=多头 死叉=空头 均线趋势"
 #property description "② SuperTrend同向确认, 吞没形态共振入场"
 #property description "③ 固定止损止盈(带开关), 追踪A/B二选一: A=渐进式 B=一次性保本"
@@ -188,7 +188,7 @@ int OnInit()
 
    EventSetTimer(1);
 
-   Print("✅ EMA55MA233_ST_吞没 EA v4.06 启动");
+   Print("✅ EMA55MA233_ST_吞没 EA v4.12 启动");
    Print("   品种:", _Symbol, " 周期:", EnumToString(_Period));
    Print("   MA:", InpFastMAPeriod, "/", InpSlowMAPeriod, " ST周期:", InpSTPeriod, " 倍率:", InpSTMultiplier);
    Print("   初始趋势: MA=", (g_trendDir == 1 ? "多头" : "空头"),
@@ -312,6 +312,8 @@ void UpdateSuperTrend()
 
 //+------------------------------------------------------------------+
 //| 吞没形态检测                                                      |
+//| 做空: 连续2根阳线(反弹)后, 一根阴线吞没前一根阳线                 |
+//| 做多: 连续2根阴线(回调)后, 一根阳线吞没前一根阴线                 |
 //+------------------------------------------------------------------+
 bool IsBullishEngulfing(int idx)
 {
@@ -320,10 +322,11 @@ bool IsBullishEngulfing(int idx)
    double open1  = iOpen(_Symbol, _Period, idx + 1);
    double close1 = iClose(_Symbol, _Period, idx + 1);
 
-   if(close1 >= open1) return(false);
-   if(close2 <= open2) return(false);
-   if(!(open2 <= close1 && close2 >= open1)) return(false);
+   if(close1 >= open1) return(false);  // 前一根必须是阴线(回调)
+   if(close2 <= open2) return(false);  // 本根必须是阳线(顺势吞没)
+   if(!(open2 <= close1 && close2 >= open1)) return(false);  // 实体完全覆盖
 
+   // 连续N根回调K线必须都是阴线(与趋势相反)
    for(int k = 1; k <= InpMinPullback; k++)
    {
       double o = iOpen(_Symbol, _Period, idx + k);
@@ -340,10 +343,11 @@ bool IsBearishEngulfing(int idx)
    double open1  = iOpen(_Symbol, _Period, idx + 1);
    double close1 = iClose(_Symbol, _Period, idx + 1);
 
-   if(close1 <= open1) return(false);
-   if(close2 >= open2) return(false);
-   if(!(open2 >= close1 && close2 <= open1)) return(false);
+   if(close1 <= open1) return(false);  // 前一根必须是阳线(反弹)
+   if(close2 >= open2) return(false);  // 本根必须是阴线(顺势吞没)
+   if(!(open2 >= close1 && close2 <= open1)) return(false);  // 实体完全覆盖
 
+   // 连续N根回调K线必须都是阳线(与趋势相反)
    for(int k = 1; k <= InpMinPullback; k++)
    {
       double o = iOpen(_Symbol, _Period, idx + k);
@@ -365,7 +369,7 @@ int CheckEngulfingEntry()
    // --- 条件2: SuperTrend同向确认(可选) ---
    if(InpUseSuperTrend && g_stDir != g_trendDir) return(0);
 
-   // --- 条件3: 吞没形态 ---
+   // --- 条件3: 吞没形态(与趋势方向一致的吞没) ---
    if(g_trendDir == 1 && IsBullishEngulfing(1)) return(1);
    if(g_trendDir == -1 && IsBearishEngulfing(1)) return(-1);
 
