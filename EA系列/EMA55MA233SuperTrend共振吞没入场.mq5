@@ -9,7 +9,7 @@
 //|  4. 连续亏损N次则暂停M分钟                                         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "4.12"
+#property version   "4.13"
 #property description "MA金叉死叉+SuperTrend共振+吞没入场+固定SL/TP+双套追踪"
 #property description "① EMA55/MA233金叉=多头 死叉=空头 均线趋势"
 #property description "② SuperTrend同向确认, 吞没形态共振入场"
@@ -188,7 +188,7 @@ int OnInit()
 
    EventSetTimer(1);
 
-   Print("✅ EMA55MA233_ST_吞没 EA v4.12 启动");
+   Print("✅ EMA55MA233_ST_吞没 EA v4.13 启动");
    Print("   品种:", _Symbol, " 周期:", EnumToString(_Period));
    Print("   MA:", InpFastMAPeriod, "/", InpSlowMAPeriod, " ST周期:", InpSTPeriod, " 倍率:", InpSTMultiplier);
    Print("   初始趋势: MA=", (g_trendDir == 1 ? "多头" : "空头"),
@@ -229,8 +229,9 @@ void OnTimer() { OnTick(); }
 void UpdateTrendDirection()
 {
    double fast[3], slow[3];
-   if(CopyBuffer(g_hFastMA, 0, 1, 3, fast) < 3) return;
-   if(CopyBuffer(g_hSlowMA, 0, 1, 3, slow) < 3) return;
+   // 数据未就绪 → 方向置0(未知), 宁可不开仓也不用过期方向
+   if(CopyBuffer(g_hFastMA, 0, 1, 3, fast) < 3) { g_trendDir = 0; return; }
+   if(CopyBuffer(g_hSlowMA, 0, 1, 3, slow) < 3) { g_trendDir = 0; return; }
 
    // 金叉精确检测
    if(fast[0] > slow[0] && fast[1] <= slow[1])
@@ -257,8 +258,9 @@ void UpdateTrendDirection()
 void UpdateSuperTrend()
 {
    double atr[1];
-   if(CopyBuffer(g_hATR, 0, 1, 1, atr) < 1) return;
-   if(atr[0] <= 0) return;
+   // 数据未就绪 → 方向置0(未知), 宁可不开仓也不用过期方向
+   if(CopyBuffer(g_hATR, 0, 1, 1, atr) < 1) { g_stDir = 0; return; }
+   if(atr[0] <= 0) { g_stDir = 0; return; }
 
    double hl2 = (iHigh(_Symbol, _Period, 1) + iLow(_Symbol, _Period, 1)) / 2.0;
    double upperBand = hl2 + InpSTMultiplier * atr[0];
@@ -266,7 +268,7 @@ void UpdateSuperTrend()
 
    // --- 迭代计算SuperTrend方向(从远到近) ---
    int maxBars = MathMin(500, Bars(_Symbol, _Period) - InpSTPeriod - 5);
-   if(maxBars < 30) return;
+   if(maxBars < 30) { g_stDir = 0; return; }
 
    int stDirBuf[500];
    double stLineBuf[500];
