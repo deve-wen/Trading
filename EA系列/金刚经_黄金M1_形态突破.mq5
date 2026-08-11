@@ -17,7 +17,7 @@
 //|  止盈: 强制 2:1 盈亏比 (TP = 入场价 ± 2×SL区间, 每笔必带)         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "1.09"
+#property version   "1.10"
 #property description "金刚经策略: EMA55/MA233顺势 + 平台突破/W底/M顶 只做顺趋势"
 #property description "① EMA55/MA233金叉死叉趋势(克罗): 只顺趋势方向开仓"
 #property description "② W底三模式: 标准(破颈线)/激进①(未破位+回调≥50%)/激进②(破位收回) 可独立开关"
@@ -25,6 +25,7 @@
 #property description "④ 每笔强制SL+TP: 止损=形态极值-20点, 止盈=2×SL(盈亏比2:1)"
 #property description "⑤ 风控: 止损≥1500点(15美金)不开仓, 可自定义阈值"
 #property description "⑥ 追踪C形态止损: 盈利300点→SL移保本+55, 之后按支撑/压力位追踪(三选一)"
+#property description "⑦ v1.10诊断: 自动检测服务器时区 + 拦截原因诊断日志(排查多终端不一致)"
 
 #include <Trade\Trade.mqh>
 
@@ -33,11 +34,15 @@
 //+------------------------------------------------------------------+
 
 //=== ★ 交易时间(北京时间) ===
-input int    InpServerHourDiff     = 5;      // 服务器比北京晚N小时(MT5=5)
+input int    InpServerHourDiff     = 5;      // 服务器比北京晚N小时(MT5=5) ← 仅 InpAutoDetectServerTZ=false 时生效
+input bool   InpAutoDetectServerTZ = true;   // ★v1.10: 自动检测服务器时区(推荐, 消除多终端时区差异; 需电脑本地时区正确)
 input int    InpTradeStartHour     = 7;      // 交易开始 时(北京)
 input int    InpTradeStartMinute   = 30;     // 交易开始 分(北京)
 input int    InpTradeEndHour       = 3;      // 交易结束 时(北京次日)
 input int    InpTradeEndMinute     = 30;     // 交易结束 分(北京次日)
+
+//=== ★ 诊断日志(排查多终端开仓不一致) ===
+input bool   InpDiagnosticLog      = false;  // ★v1.10: 详细诊断日志(开仓拦截原因+环境信息, 排查不一致时开启)
 
 //=== ★ 仓位管理 ===
 input bool   InpUseFixedLot        = true;   // true=固定手数 false=百分比
@@ -101,6 +106,35 @@ input int    InpPauseMinutes        = 90;     // 暂停时间(分钟)
 //| 追踪槽位容量宏 (MQL5: 类内static const数组维度不受支持, 用宏)     |
 //+------------------------------------------------------------------+
 #define TRAIL_SLOT_COUNT 100
+
+//+------------------------------------------------------------------+
+//| 服务器时区偏移(小时, 相对GMT)  ★v1.10新增                         |
+//| 例: 服务器=GMT+2 → 返回2; 服务器=GMT+3 → 返回3                   |
+//| 原理: TimeCurrent()(服务器时间) - TimeGMT()(GMT时间) 的时差        |
+//| 注意: TimeGMT() 依赖电脑本地时区设置正确(香港/中国=GMT+8)         |
+//+------------------------------------------------------------------+
+int ServerTZOffsetHours()
+{
+   datetime server = TimeCurrent();
+   datetime gmt    = TimeGMT();
+   return (int)MathRound((server - gmt) / 3600.0);
+}
+
+//+------------------------------------------------------------------+
+//| 当前北京时间 ★v1.10新增                                          |
+//| InpAutoDetectServerTZ=true  → 自动检测服务器时区换算(推荐)        |
+//| InpAutoDetectServerTZ=false → 用手动 InpServerHourDiff            |
+//+------------------------------------------------------------------+
+datetime BeijingTimeNow()
+{
+   datetime server = TimeCurrent();
+   if(InpAutoDetectServerTZ)
+   {
+      int serverTZ = ServerTZOffsetHours();
+      return server + (8 - serverTZ) * 3600;   // 北京=GMT+8
+   }
+   return server + InpServerHourDiff * 3600;
+}
 
 //+------------------------------------------------------------------+
 //| 通用交易模块类                                                      |
@@ -303,13 +337,14 @@ void CCommonTradingModule::UpdateConsecutiveLossFromHistory()
 }
 
 //+------------------------------------------------------------------+
-//| 检查交易时间（北京时间）                                             |
+//| 检查交易时间（北京时间）                                            |
+//| ★v1.10: 支持自动检测服务器时区, 消除多终端/多服务器时区差异       |
 //+------------------------------------------------------------------+
 bool CCommonTradingModule::IsTradeTimeAllowed()
 {
    datetime serverTime = TimeCurrent();
-   // 服务器时间 + 时差 = 北京时间
-   datetime beijingTime = serverTime + InpServerHourDiff * 3600;
+   // 北京时间: 自动检测(推荐) 或 手动HourDiff
+   datetime beijingTime = BeijingTimeNow();
 
    MqlDateTime dt;
    TimeToStruct(beijingTime, dt);
@@ -1204,7 +1239,18 @@ int OnInit()
 
    EventSetTimer(2);
 
-   Print("✅ 金刚经_黄金M1_形态突破 v1.08 启动");
+   Print("✅ 金刚经_黄金M1_形态突破 v1.10 启动");
+   Print("🖥️ 环境: 服务器=", AccountInfoString(ACCOUNT_SERVER),
+         " 账户=", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+         " 货币=", AccountInfoString(ACCOUNT_CURRENCY));
+   Print("   TimeCurrent(服务器)=", TimeToString(TimeCurrent()),
+         " GMT=", TimeToString(TimeGMT()),
+         " 服务器时区=GMT", (ServerTZOffsetHours() >= 0 ? "+" : ""), IntegerToString(ServerTZOffsetHours()),
+         " 当前北京时间=", TimeToString(BeijingTimeNow()));
+   Print("   交易窗口 BJT ", InpTradeStartHour, ":", StringFormat("%02d", InpTradeStartMinute),
+         "~次日", InpTradeEndHour, ":", StringFormat("%02d", InpTradeEndMinute),
+         " 当前点差=", (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), "点",
+         " 诊断日志=", (InpDiagnosticLog ? "开" : "关"));
    Print("   品种:", _Symbol, " 形态周期:", EnumToString(InpPatternTF), " 趋势周期:", EnumToString(InpTrendTF));
    Print("   形态: W底=", InpUseWBottom, "(激进①=", InpUseWBAggr1, " 激进②=", InpUseWBAggr2, ")",
          " M顶=", InpUseMTop, "(激进①=", InpUseMTopAggr1, " 激进②=", InpUseMTopAggr2, ")",
@@ -1223,8 +1269,6 @@ int OnInit()
       Print("   追踪C: 形态追踪 (触发=", InpTrailingCTriggerPts, " 保护=", InpTrailingCProtectPts,
             " 形态缓冲=", InpTrailingCSLBufferPts, ")");
    Print("   激进①回调深度: ≥ 反弹幅度的 ", InpAggrPullbackPct * 100, "% (防追单)");
-   Print("   交易时间 BJT ", InpTradeStartHour, ":", StringFormat("%02d", InpTradeStartMinute),
-         " ~ 次日", InpTradeEndHour, ":", StringFormat("%02d", InpTradeEndMinute));
 
    return(INIT_SUCCEEDED);
 }
@@ -1613,9 +1657,27 @@ int CountPositions()
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
-   // 1. 风控检查 (仅控制是否开新仓)
+   // 1. 风控检查 (仅控制是否开新仓) ★v1.10: 细分拦截原因, 诊断模式打印详情
    if(!g_Common.IsTradingAllowed())
+   {
+      if(InpDiagnosticLog)
+      {
+         string reason = "未知";
+         if(!g_Common.IsTradeTimeAllowed())
+            reason = "交易时间外(北京时间窗口外)";
+         else if(!g_Common.CheckSpreadLimit())
+            reason = "点差超标(当前>上限" + IntegerToString(InpMaxSpreadPoints) + "点)";
+         else if(!g_Common.CheckDailyLossLimit())
+            reason = "当日亏损已达上限";
+         else if(!g_Common.CheckConsecutiveLossPause())
+            reason = "连续亏损暂停中";
+         Print("🩺 诊断: 开仓被风控拦截 - ", reason,
+               " | 服务器时间=", TimeToString(TimeCurrent()),
+               " | 北京时间=", TimeToString(BeijingTimeNow()),
+               " | 点差=", (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), "点");
+      }
       return;
+   }
 
    // 2. 持仓上限
    if(CountPositions() >= InpMaxPositions)
@@ -1624,7 +1686,12 @@ void CheckEntry()
    // 3. 趋势方向更新 (克罗: EMA55/MA233顺势) — 只顺趋势方向
    UpdateTrendDirection();
    if(InpUseTrendFilter && g_trendDir == 0)
+   {
+      if(InpDiagnosticLog)
+         Print("🩺 诊断: 趋势方向=0(EMA55与MA233相等或数据未就绪) 暂不开仓",
+               " | 北京时间=", TimeToString(BeijingTimeNow()));
       return;
+   }
 
    // ★ 方向: 多头趋势只做多, 空头趋势只做空 (开关关闭时双向)
    bool allowLong  = (!InpUseTrendFilter) || (g_trendDir >= 0);
@@ -1688,7 +1755,24 @@ void CheckEntry()
 
    // 5. 无信号
    if(signal == WRONG_VALUE)
+   {
+      // ★v1.10 诊断快照: 打印当前市场数据, 便于对比多终端数据差异
+      if(InpDiagnosticLog)
+      {
+         double fast[1], slow[1];
+         CopyBuffer(g_hFastMA, 0, 1, 1, fast);
+         CopyBuffer(g_hSlowMA, 0, 1, 1, slow);
+         Print("🩺 诊断: 形态未触发 | 趋势=", (g_trendDir == 1 ? "多头" : (g_trendDir == -1 ? "空头" : "0")),
+               " EMA55=", DoubleToString(fast[0], 2),
+               " MA233=", DoubleToString(slow[0], 2),
+               " | bar1 O=", DoubleToString(iOpen(_Symbol, InpPatternTF, 1), 2),
+               " H=", DoubleToString(iHigh(_Symbol, InpPatternTF, 1), 2),
+               " L=", DoubleToString(iLow(_Symbol, InpPatternTF, 1), 2),
+               " C=", DoubleToString(iClose(_Symbol, InpPatternTF, 1), 2),
+               " | 北京时间=", TimeToString(BeijingTimeNow()));
+      }
       return;
+   }
 
    // 6. 信号去重: 同一形态bar只开一单 (iTime时间戳唯一标识)
    datetime sigBarTime = iTime(_Symbol, InpPatternTF, 1);
