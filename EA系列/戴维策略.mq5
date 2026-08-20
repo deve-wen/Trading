@@ -1,38 +1,38 @@
 //+------------------------------------------------------------------+
-//|                    金刚经与回调入场策略.mq5                        |
+//|                        戴维策略.mq5                               |
 //|                                                                   |
-//|  基于《金刚经_黄金M1_形态突破 v1.10》独立拆分的回调入场策略        |
-//|                                                                   |
-//|  策略来源: 知识库三合一 + 用户回调企稳入场理念                     |
-//|  ①《金刚经策略》: 平台突破/W底/M顶 3种形态                        |
-//|     止损设在形态极值(颈线/平台高低点)                              |
-//|  ②《克罗谈投资策略》: EMA55/MA233金叉死叉顺势(追市)               |
-//|     只顺趋势方向做单, 每笔风险1%~3%                               |
-//|  ③《技术分析常见形态》: W底=第二底高于第一底, M顶=第二顶低于第一顶 |
-//|     收盘突破颈线确认(收盘价越过突破线原则)                        |
-//|  ④ ★用户回调企稳理念: 顺大趋势 → 逆小回调 → 回调企稳后入场        |
-//|     止损更小, 胜率更高 (防追高追空)                               |
-//|                                                                   |
-//|  周期: 黄金 M1 (主周期)                                           |
 //|  趋势: EMA55/MA233金叉=多头(只做多) 死叉=空头(只做空)             |
-//|  形态: 平台突破(只做顺趋势方向) / W底三模式 / M顶三模式           |
-//|  回调: ★v2.02 2B法则入场(摆动确认2根; v2.01跌破+收回总窗口≤34根) |
-//|       多头: 回调创低点L1 → 34根内跌破L1创L2 → 收盘收回L1上方开多  |
-//|             或 L2未破L1且价差≤200点 + 企稳阳线开多 (空头镜像)     |
-//|  入场: 形态/回调收盘确认 → 下根K线开盘市价入场                    |
-//|  止损: 形态/波段极值 - 20点 (绝对价格, 每笔必带)                  |
-//|  止盈: 强制 2:1 盈亏比 (TP = 入场价 ± 2×SL区间, 每笔必带)         |
+//|       与《金刚经与回调2B入场策略》趋势定义完全一致                 |
+//|  周期: 黄金 M1                                                      |
+//|                                                                   |
+//|  入场板块一: ★突破开仓(三种突破, 盈亏比极佳的入场位)              |
+//|    ① W底-标准: 多头趋势中, bar1盘中突破颈线+收盘站上颈线          |
+//|       → 下根K线开盘做多 (空头M顶镜像: 盘中跌破颈线+收盘站下)      |
+//|    ② M顶-标准: 空头趋势中, 对颈线位的突破                         |
+//|    ③ 顺势平台突破: 多头突破重要阻力(前N根K线最高)做多              |
+//|       / 空头跌破重要支撑(前N根K线最低)做空, 只顺趋势方向           |
+//|  入场板块二: ★形态开仓(2B法则, 只在趋势行情中做, 调整行情不做)    |
+//|    多头趋势中区分两种行情:                                         |
+//|    - 趋势行情: 不断创新高, 每次回调低点不断抬高 (HH+HL结构)        |
+//|    - 调整行情: 每次向下回调低点都低于前一次 (LH+LL下跌结构)        |
+//|    只在趋势行情(HH+HL)中符合2B法则才开多; 调整行情中的2B不开仓    |
+//|    场景A标准2B: 回调创低L1 → 34根内跌破L1创L2 → 收盘收回L1上方    |
+//|    场景B双底企稳: L2未破L1 且价差≤200点 + 企稳阳线 (空头镜像)     |
+//|  入场: 突破/2B收盘确认 → 下根K线开盘市价入场                       |
+//|  止损: 形态下方低点下方20点 (绝对价格, 每笔必带)                   |
+//|  止盈: 固定盈亏比 2.6:1 (TP = 入场价 ± 2.6×SL区间, 每笔必带)      |
+//|  风控: 止损≥1500点拒开; 追踪A/B/C三选一; 分批止盈; 平仓冷却       |
+//|  收盘: ★不持仓过夜: 收盘前N分钟强平; 收盘前30分钟禁开新仓         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "2.05"
-#property description "金刚经与回调入场策略: EMA55/MA233顺势 + 形态突破 + 2B法则回调入场(独立EA)"
-#property description "① 趋势: EMA55/MA233金叉死叉只做顺势; W底/M顶三模式+平台突破"
-#property description "② ★v2.00回调入场改2B法则: 破位收回(标准2B) / 双底未破+企稳阳线, 只顺大趋势"
-#property description "③ v2.02: 摆动确认=2根; v2.01跌破+收回总窗口≤L1后34根; SL/TP 2:1"
-#property description "④ 风控: 止损≥1500点拒开; 追踪A/B/C三选一; 分批止盈; 平仓冷却"
-#property description "⑤ 防历史回放; 顺势关键位突破; 自动时区; 诊断日志"
-#property description "⑥ ★v2.04不持仓过夜: 收盘前N分钟强平全部持仓; 收盘前30分钟禁开新仓"
-#property description "⑦ v2.05: 2B结构前提HH+HL(多)/LH+LL(空), 双前提才开仓"
+#property version   "1.00"
+#property description "戴维策略: EMA55/MA233顺势 + 突破开仓(W底/M顶/平台) + 2B形态开仓(仅趋势行情)"
+#property description "① 趋势: EMA55/MA233金叉死叉只做顺势(与金刚经2B一致)"
+#property description "② 突破开仓: W底/M顶标准破颈线 + 顺势平台突破(重要支撑阻力), 盈亏比极佳"
+#property description "③ 2B形态开仓: 只在趋势行情(HH+HL/LH+LL)中做2B, 调整行情2B不开仓"
+#property description "④ 止盈: 固定盈亏比2.6:1; 止损: 形态下方低点下方20点"
+#property description "⑤ 风控: 止损≥1500点拒开; 追踪A/B/C三选一; 分批止盈; 平仓冷却"
+#property description "⑥ 收盘强平+禁开仓(不持仓过夜); 自动时区; 防历史回放"
 
 #include <Trade\Trade.mqh>
 
@@ -1179,22 +1179,15 @@ void CCommonTradingModule::OnTimer()
 //+------------------------------------------------------------------+
 //| ★ 策略输入参数                                                    |
 //+------------------------------------------------------------------+
-input group "=== ★ 形态开关 ==="
-input bool   InpUseWBottom       = true;     // 启用W底-标准(突破颈线)
-input bool   InpUseWBAggr1       = true;     // 启用W底-激进①(第二底未破第一底+回调≥50%反弹+阳线收过第一底K线高)
-input bool   InpUseWBAggr2       = true;     // 启用W底-激进②(第二底破位但5根内阳线收回)
-input bool   InpUseMTop          = true;     // 启用M顶-标准(跌破颈线)
-input bool   InpUseMTopAggr1     = true;     // 启用M顶-激进①(第二顶未破第一顶+反弹≥50%回调+阴线收破第一顶K线低)
-input bool   InpUseMTopAggr2     = true;     // 启用M顶-激进②(第二顶破位但5根内阴线收回)
-input bool   InpUsePlatform      = true;     // ★v1.22 启用顺势关键位突破(金叉多头突破前高做多,死叉空头跌破前低做空)
+input group "=== ★ 突破开仓: 形态开关(三种突破) ==="
+input bool   InpUseWBottom       = true;     // 启用W底-标准(多头突破颈线做多)
+input bool   InpUseMTop          = true;     // 启用M顶-标准(空头跌破颈线做空)
+input bool   InpUsePlatform      = true;     // 启用顺势平台突破(多头突破重要阻力做多/空头跌破重要支撑做空, 只顺趋势)
 
-input group "=== ★ 激进①回调深度(防追单) ==="
-input double InpAggrPullbackPct  = 0.50;     // 激进①回调深度: 第二底回调≥反弹幅度的此比例
-
-input group "=== ★ v2.05 回调入场: 2B法则(回调板块摆动确认=2根, 与全局InpSwingStrength=3解耦) ==="
-input bool   InpUsePullbackEntry   = true;   // 启用2B法则回调入场(总开关)
-input bool   InpUse2BStructure     = true;   // ★v2.05 形态结构前提: 多头HH+HL(高点/低点逐个升高), 空头LH+LL镜像
-input int    Inp2BMaxBars          = 34;     // ★v2.01总窗口: L1出现后跌破+收回全程≤此根数(34根=34分钟)
+input group "=== ★ 2B形态开仓: 参数(只在趋势行情中做, 调整行情不做) ==="
+input bool   InpUsePullbackEntry   = true;   // 启用2B形态开仓(总开关)
+input bool   InpUse2BStructure     = true;   // ★核心: 趋势行情前提 — 多头HH+HL(创新高+低点抬高)才开多, 调整行情LH+LL(创新低)2B不开仓, 空头镜像
+input int    Inp2BMaxBars          = 34;     // 总窗口: L1出现后跌破+收回全程≤此根数(34根=34分钟)
 input int    Inp2BMaxGapPts        = 200;    // 2B: 两低点/两高点最大价差(点, 200点=2美金)
 input double InpPullbackPctMin      = 0.50;  // 回调幅度最低比例(前一波段的此比例, 防追高)
 input int    InpPullbackLookback    = 60;    // 波段/摆动点搜索回看K线数
@@ -1216,9 +1209,7 @@ input int    InpSwingLookback    = 40;       // 摆动点搜索回看K线数(W�
 input int    InpMinWavePts       = 30;       // 最小波幅(摆动点间最小距离,点)
 input int    InpNeckHeightMinPts = 200;      // ★v1.13 颈线距两底/两顶最小高度(点, 标准模式要求≥此值)
 input int    InpNeckBufferPts    = 8;        // 颈线突破确认缓冲(点)
-input int    InpAggrRecoverBars  = 5;        // 激进②破位后收回K线数上限(默认5根)
-input int    InpPlatLookback     = 15;       // 平台回看K线数
-input int    InpPlatMaxRangePts  = 150;      // 平台最大区间(点)
+input int    InpPlatLookback     = 15;       // 平台回看K线数(前N根高低=重要支撑/阻力位)
 
 input group "=== ★ v1.22 防追高(颈线突破约束, W底/M顶标准模式) ==="
 input bool   InpRequireFirstBreak = true;    // ★v1.22 要求bar1是首次突破(bar2最高<颈线才开仓, 防震荡后偶然突破)
@@ -1226,9 +1217,9 @@ input int    InpMaxBreakoutDistPts = 100;    // ★v1.22 bar1收盘距离颈线�
 input int    InpMaxNeckAgeBars    = 30;      // ★v1.22 颈线距今最大K线数(颈线太老不构成有效形态)
 
 input group "=== ★ 出场参数 ==="
-input int    InpSLBufferPts      = 20;       // 形态止损缓冲(点)
-input int    InpMaxPositions     = 2;        // ★v1.15 最大同时持仓数(2=分批止盈平部分后可开新仓)
-input double InpRewardRiskRatio  = 2.0;      // 盈亏比(TP/SL倍数): 2=2:1, 3=3:1, 5=5:1等
+input int    InpSLBufferPts      = 20;       // 形态止损缓冲(点): SL=形态下方低点下方此点数
+input int    InpMaxPositions     = 2;        // 最大同时持仓数(2=分批止盈平部分后可开新仓)
+input double InpRewardRiskRatio  = 2.6;      // ★固定盈亏比(TP/SL倍数): 2.6=2.6:1 (2=2:1, 3=3:1可调)
 
 input group "=== ★ v1.15 分批止盈(独立开关, 每档比例可调) ==="
 input bool   InpUseTieredTP      = true;     // 启用分批止盈(利润达1/2/3倍止损空间分批平仓)
@@ -1261,7 +1252,7 @@ int    g_hSlowMA   = INVALID_HANDLE;
 datetime g_lastEntryBarTime = 0;   // 上次入场K线时间(信号去重)
 datetime g_lastBarTime      = 0;   // 上次处理的M1 K线时间
 int      g_trendDir         = 0;   // 趋势: 1=多 -1=空 0=未知
-int      g_magic            = 20260812;
+int      g_magic            = 20260818;
 datetime g_lastCloseBarTime = 0;   // 上次平仓所在K线时间(同根K线冷却用)
 datetime g_endCloseDate     = 0;   // ★v2.04 已执行收盘强平的北京日期(00:00归一化, 跨日重置)
 
@@ -1296,8 +1287,8 @@ void SaveTier1FiredFlag()
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   g_magic = 20260812;
-   g_gvTier1Fired = "JGJ_PB_T1F_" + IntegerToString(g_magic);  // ★v1.17 用magic区分持久化键
+   g_magic = 20260818;
+   g_gvTier1Fired = "DW_T1F_" + IntegerToString(g_magic);  // ★v1.17 用magic区分持久化键
    g_lastCloseBarTime = 0;
    g_anyTier1Triggered = false;
    ZeroMemory(g_tierSlots);
@@ -1324,7 +1315,7 @@ int OnInit()
             "分钟): 强平后到收盘前仍可能开新仓, 建议禁开仓提前量 > 强平提前量");
 
    //--- 通用模块初始化
-   if(!g_Common.Init(g_magic, "JGJ_PB"))
+   if(!g_Common.Init(g_magic, "DAVID"))
    {
       Print("❌ 通用模块初始化失败");
       return(INIT_FAILED);
@@ -1359,7 +1350,7 @@ int OnInit()
 
    EventSetTimer(2);
 
-   Print("✅ 金刚经与回调2B入场策略 v2.05 启动");
+   Print("✅ 戴维策略 v1.00 启动");
    Print("🖥️ 环境: 服务器=", AccountInfoString(ACCOUNT_SERVER),
          " 账户=", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
          " 货币=", AccountInfoString(ACCOUNT_CURRENCY));
@@ -1375,9 +1366,9 @@ int OnInit()
          " 提前", InpCloseAllMinsBeforeEnd, "分钟强平全部持仓",
          " | 禁开仓提前", InpNoEntryMinsBeforeEnd, "分钟");
    Print("   品种:", _Symbol, " 形态周期:", EnumToString(InpPatternTF), " 趋势周期:", EnumToString(InpTrendTF));
-   Print("   形态: W底=", InpUseWBottom, "(激进①=", InpUseWBAggr1, " 激进②=", InpUseWBAggr2, ")",
-         " M顶=", InpUseMTop, "(激进①=", InpUseMTopAggr1, " 激进②=", InpUseMTopAggr2, ")",
-         " 平台=", InpUsePlatform);
+   Print("   突破开仓形态: W底-标准=", InpUseWBottom,
+         " M顶-标准=", InpUseMTop,
+         " 顺势平台突破=", InpUsePlatform);
    Print("   EMA55/MA233趋势判断: ", (InpUseTrendFilter ? "开启(只做顺势)" : "关闭(多空双向)"));
    Print("   趋势MA: ", InpFastMAPeriod, "/", InpSlowMAPeriod,
          " 初始趋势: ", (g_trendDir == 1 ? "多头" : "空头"));
@@ -1391,8 +1382,7 @@ int OnInit()
    else if(InpUseTrailingC)
       Print("   追踪C: 形态追踪 (触发=", InpTrailingCTriggerPts, " 保护=", InpTrailingCProtectPts,
             " 形态缓冲=", InpTrailingCSLBufferPts, ")");
-   Print("   激进①回调深度: ≥ 反弹幅度的 ", InpAggrPullbackPct * 100, "% (防追单)");
-   Print("   ★v1.14 平仓冷却: ", (InpUseCloseCooldown ? "启用" : "禁用"),
+   Print("   ★平仓冷却: ", (InpUseCloseCooldown ? "启用" : "禁用"),
          " 平仓后", InpCloseCooldownBars, "根K线内禁止再开仓 | 盈亏比=", DoubleToString(InpRewardRiskRatio, 1), ":1");
    Print("   ★v1.15 分批止盈: ", (InpUseTieredTP ? "启用" : "禁用"),
          " 第1档@", DoubleToString(InpTier1ProfitMult, 1), "xSL平", DoubleToString(InpTier1ClosePct * 100, 0), "%",
@@ -1403,8 +1393,8 @@ int OnInit()
          " → 第1档触发=", (g_anyTier1Triggered ? "已触发(允许开第2仓)" : "未触发(第2仓将拦截)"),
          " | GV=", g_gvTier1Fired,
          " | GV值=", (GlobalVariableCheck(g_gvTier1Fired) ? DoubleToString(GlobalVariableGet(g_gvTier1Fired), 0) : "不存在"));
-   Print("   ★v2.05 2B法则回调入场: ", (InpUsePullbackEntry ? "启用" : "禁用"),
-         " | 结构前提(HH+HL/LH+LL)=", (InpUse2BStructure ? "开" : "关"),
+   Print("   ★2B形态开仓: ", (InpUsePullbackEntry ? "启用" : "禁用"),
+         " | 只在趋势行情做(调整行情2B不开仓)=", (InpUse2BStructure ? "开" : "关"),
          " | 跌破+收回总窗口≤", Inp2BMaxBars, "根",
          " | 两低点价差≤", Inp2BMaxGapPts, "点",
          " | 回调≥", InpPullbackPctMin * 100, "%",
@@ -1697,19 +1687,15 @@ int FindSwingHigh(int fromIdx, int maxIdx, int strength)
 }
 
 //+------------------------------------------------------------------+
-//| W底检测 (多头趋势) — 三种入场模式                                 |
-//| 模式1 标准: 收盘突破颈线(N) + 缓冲 → 入场                         |
-//| 模式2 激进①: 第二底L1未破第一底L0最低价 + 阳线收过第一底K线最高价 |
-//| 模式3 激进②: 第二底L1跌破L0, 但InpAggrRecoverBars根内阳线收回     |
-//| 返回: 1=标准 2=激进① 3=激进② 0=无信号                             |
-//| 输出: slTarget 形态止损(止盈2:1由CheckEntry统一计算)              |
+//| W底检测 (多头趋势) — 突破开仓: 标准模式                           |
+//| 模式1 标准: 该K线盘中突破颈线(N) + 收盘站上颈线 → 下根开盘做多    |
+//| 返回: 1=标准 0=无信号                                              |
+//| 输出: slTarget 形态止损(止盈2.6:1由CheckEntry统一计算)             |
 //+------------------------------------------------------------------+
 int DetectWBottom(double &slTarget)
 {
    double point = _Point;
-   double open1  = iOpen(_Symbol, InpPatternTF, 1);
    double high1  = iHigh(_Symbol, InpPatternTF, 1);
-   double low1   = iLow(_Symbol, InpPatternTF, 1);
    double close1 = iClose(_Symbol, InpPatternTF, 1);
 
    // 最近摆动低点L1: 距今至少2*strength+2根(右翼已确认)
@@ -1723,53 +1709,6 @@ int DetectWBottom(double &slTarget)
 
    double L0 = iLow(_Symbol, InpPatternTF, idxL0);
    double L1 = iLow(_Symbol, InpPatternTF, idxL1);
-   double H0 = iHigh(_Symbol, InpPatternTF, idxL0);  // 第一底最低K线的最高价
-
-   // ========== 模式2: 激进① (第二底未破第一底最低价) ==========
-   // ★ v1.09优化(防追单): 第二底回调深度 ≥ 最近一波反弹幅度的 InpAggrPullbackPct
-   //   最近一波反弹: 第一底L0 → 两底之间摆动高点(颈线N) 的幅度 = N - L0
-   //   第二底回调深度 = N - L1, 要求 N - L1 ≥ (N - L0) × InpAggrPullbackPct
-   if(InpUseWBAggr1)
-   {
-      // 条件: L1 >= L0 (未破位) 且 阳线 且 收盘 > 第一底最低K线的最高价
-      if(L1 >= L0 && close1 > open1 &&
-         close1 > H0 + InpNeckBufferPts * point)
-      {
-         // 找两底之间的反弹高点(颈线N)作为反弹幅度基准
-         int idxN = FindSwingHigh(idxL1 + InpSwingStrength + 1, idxL0 - InpSwingStrength - 1, InpSwingStrength);
-         bool pullbackOk = true;
-         if(idxN > 0)
-         {
-            double N = iHigh(_Symbol, InpPatternTF, idxN);
-            double rallyAmp = N - L0;          // 最近一波反弹幅度
-            double pullDepth = N - L1;         // 第二底回调深度
-            if(rallyAmp > 0 && pullDepth < rallyAmp * InpAggrPullbackPct)
-               pullbackOk = false;             // 回调不足50%, 有追单嫌疑 → 拒绝
-         }
-         // 未找到反弹高点时, 保守处理: 要求有颈线才算有效回调(防追单)
-         else
-            pullbackOk = false;
-
-         if(pullbackOk)
-         {
-            slTarget = L0 - InpSLBufferPts * point;   // 止损=第一底最低点-20
-            return 2;
-         }
-      }
-   }
-
-   // ========== 模式3: 激进② (第二底破位, 5根内阳线收回) ==========
-   if(InpUseWBAggr2)
-   {
-      // 条件: L1 < L0 (破位) 且 两底间距≤RecoverBars 且 阳线 且 收盘>第一底K线最高价
-      // ★ v1.05修复: 索引越大越早, 两底间隔 = idxL0 - idxL1
-      if(L1 < L0 && (idxL0 - idxL1) <= InpAggrRecoverBars &&
-         close1 > open1 && close1 > H0 + InpNeckBufferPts * point)
-      {
-         slTarget = L1 - InpSLBufferPts * point;   // 止损=第二底最低点-20
-         return 3;
-      }
-   }
 
    // ========== 模式1: 标准 (突破颈线) ==========
    if(InpUseWBottom)
@@ -1782,27 +1721,27 @@ int DetectWBottom(double &slTarget)
       if(idxN > 0)
       {
          double N = iHigh(_Symbol, InpPatternTF, idxN);
-         // ★v1.13 颈线高于两底 ≥ InpNeckHeightMinPts(默认200点) — 形态高度不够不构成有效W底
+         // ★颈线高于两底 ≥ InpNeckHeightMinPts(默认200点) — 形态高度不够不构成有效W底
          if(N > L0 + InpNeckHeightMinPts * point && N > L1 + InpNeckHeightMinPts * point)
          {
-            // ★v1.22 ① 颈线年龄约束(防止"颈线太老"的假突破, 形态早已完成)
+            // ★ ① 颈线年龄约束(防止"颈线太老"的假突破, 形态早已完成)
             if(idxN > InpMaxNeckAgeBars) return 0;
 
-            // ★v1.11 有效突破: 该K线盘中最高价突破颈线位 + 收盘价依然收在颈线之上
+            // ★ 有效突破: 该K线盘中最高价突破颈线位 + 收盘价依然收在颈线之上
             //   (排除假突破: 盘中刺穿但收盘回落颈线下方 = 无效)
             if(high1 > N && close1 > N)
             {
-               // ★v1.22 ② 突破距离约束: bar1收盘距离颈线 ≤ 阈值(防止"已突破很久才入场"导致止损过大)
+               // ★ ② 突破距离约束: bar1收盘距离颈线 ≤ 阈值(防止"已突破很久才入场"导致止损过大)
                if(close1 - N > InpMaxBreakoutDistPts * point) return 0;
 
-               // ★v1.22 ③ 首次突破约束(可选): bar2最高 < 颈线, 保证 bar1 是首次突破(防"颈线之上震荡")
+               // ★ ③ 首次突破约束(可选): bar2最高 < 颈线, 保证 bar1 是首次突破(防"颈线之上震荡")
                if(InpRequireFirstBreak)
                {
                   double high2 = iHigh(_Symbol, InpPatternTF, 2);
                   if(high2 >= N) return 0;
                }
 
-               // ★v1.13 止损回归v1.10旧逻辑: 整个W底形态最低点下方20点
+               // 止损: 整个W底形态最低点下方20点 (形态下方低点下方20点)
                double lowest = MathMin(L0, L1);      // W底最低点
                slTarget = lowest - InpSLBufferPts * point;
                return 1;
@@ -1815,17 +1754,13 @@ int DetectWBottom(double &slTarget)
 }
 
 //+------------------------------------------------------------------+
-//| M顶检测 (空头趋势) — 三种入场模式 (W底镜像)                      |
-//| 模式1 标准: 收盘跌破颈线(N) - 缓冲 → 入场                        |
-//| 模式2 激进①: 第二顶H1未破第一顶H0最高价 + 阴线收破第一顶K线最低价|
-//| 模式3 激进②: 第二顶H1突破H0, 但InpAggrRecoverBars根内阴线收回    |
-//| 返回: 1=标准 2=激进① 3=激进② 0=无信号                             |
+//| M顶检测 (空头趋势) — 突破开仓: 标准模式 (W底镜像)                 |
+//| 模式1 标准: 该K线盘中跌破颈线(N) + 收盘站下颈线 → 下根开盘做空    |
+//| 返回: 1=标准 0=无信号                                              |
 //+------------------------------------------------------------------+
 int DetectMTop(double &slTarget)
 {
    double point = _Point;
-   double open1  = iOpen(_Symbol, InpPatternTF, 1);
-   double high1  = iHigh(_Symbol, InpPatternTF, 1);
    double low1   = iLow(_Symbol, InpPatternTF, 1);
    double close1 = iClose(_Symbol, InpPatternTF, 1);
 
@@ -1840,53 +1775,6 @@ int DetectMTop(double &slTarget)
 
    double H0 = iHigh(_Symbol, InpPatternTF, idxH0);
    double H1 = iHigh(_Symbol, InpPatternTF, idxH1);
-   double L0 = iLow(_Symbol, InpPatternTF, idxH0);   // 第一顶最高K线的最低价
-
-   // ========== 模式2: 激进① (第二顶未破第一顶最高价) ==========
-   // ★ v1.09优化(防追单): 第二顶反弹高度 ≥ 最近一波回调幅度的 InpAggrPullbackPct
-   //   最近一波回调: 第一顶H0 → 两顶之间摆动低点(颈线N) 的幅度 = H0 - N
-   //   第二顶反弹高度 = H1 - N, 要求 H1 - N ≥ (H0 - N) × InpAggrPullbackPct
-   if(InpUseMTopAggr1)
-   {
-      // 条件: H1 <= H0 (未破位) 且 阴线 且 收盘 < 第一顶最高K线的最低价
-      if(H1 <= H0 && close1 < open1 &&
-         close1 < L0 - InpNeckBufferPts * point)
-      {
-         // 找两顶之间的回调低点(颈线N)作为回调幅度基准
-         int idxN = FindSwingLow(idxH1 + InpSwingStrength + 1, idxH0 - InpSwingStrength - 1, InpSwingStrength);
-         bool pullbackOk = true;
-         if(idxN > 0)
-         {
-            double N = iLow(_Symbol, InpPatternTF, idxN);
-            double pullAmp = H0 - N;           // 最近一波回调幅度
-            double bounceH  = H1 - N;          // 第二顶反弹高度
-            if(pullAmp > 0 && bounceH < pullAmp * InpAggrPullbackPct)
-               pullbackOk = false;             // 反弹不足50%, 有追单嫌疑 → 拒绝
-         }
-         // 未找到回调低点时, 保守处理(防追单)
-         else
-            pullbackOk = false;
-
-         if(pullbackOk)
-         {
-            slTarget = H0 + InpSLBufferPts * point;   // 止损=第一顶最高点+20
-            return 2;
-         }
-      }
-   }
-
-   // ========== 模式3: 激进② (第二顶破位, 5根内阴线收回) ==========
-   if(InpUseMTopAggr2)
-   {
-      // 条件: H1 > H0 (破位) 且 两顶间距≤RecoverBars 且 阴线 且 收盘<第一顶K线最低价
-      // ★ v1.05修复: 索引越大越早, 两顶间隔 = idxH0 - idxH1
-      if(H1 > H0 && (idxH0 - idxH1) <= InpAggrRecoverBars &&
-         close1 < open1 && close1 < L0 - InpNeckBufferPts * point)
-      {
-         slTarget = H1 + InpSLBufferPts * point;   // 止损=第二顶最高点+20
-         return 3;
-      }
-   }
 
    // ========== 模式1: 标准 (跌破颈线) ==========
    if(InpUseMTop)
@@ -1899,27 +1787,27 @@ int DetectMTop(double &slTarget)
       if(idxN > 0)
       {
          double N = iLow(_Symbol, InpPatternTF, idxN);
-         // ★v1.13 颈线低于两顶 ≥ InpNeckHeightMinPts(默认200点) — 形态深度不够不构成有效M顶
+         // ★颈线低于两顶 ≥ InpNeckHeightMinPts(默认200点) — 形态深度不够不构成有效M顶
          if(N < H0 - InpNeckHeightMinPts * point && N < H1 - InpNeckHeightMinPts * point)
          {
-            // ★v1.22 ① 颈线年龄约束(防止"颈线太老"的假跌破)
+            // ★ ① 颈线年龄约束(防止"颈线太老"的假跌破)
             if(idxN > InpMaxNeckAgeBars) return 0;
 
-            // ★v1.11 有效突破: 该K线盘中最低价跌破颈线位 + 收盘价依然收在颈线之下
+            // ★ 有效突破: 该K线盘中最低价跌破颈线位 + 收盘价依然收在颈线之下
             //   (排除假突破: 盘中刺穿但收盘收回颈线上方 = 无效)
             if(low1 < N && close1 < N)
             {
-               // ★v1.22 ② 突破距离约束: bar1收盘距离颈线 ≤ 阈值(防止"已跌破很久才入场"导致止损过大)
+               // ★ ② 突破距离约束: bar1收盘距离颈线 ≤ 阈值(防止"已跌破很久才入场"导致止损过大)
                if(N - close1 > InpMaxBreakoutDistPts * point) return 0;
 
-               // ★v1.22 ③ 首次跌破约束(可选): bar2最低 > 颈线, 保证 bar1 是首次跌破(防"颈线之下震荡")
+               // ★ ③ 首次跌破约束(可选): bar2最低 > 颈线, 保证 bar1 是首次跌破(防"颈线之下震荡")
                if(InpRequireFirstBreak)
                {
                   double low2 = iLow(_Symbol, InpPatternTF, 2);
                   if(low2 <= N) return 0;
                }
 
-               // ★v1.13 止损回归v1.10旧逻辑: 整个M顶形态最高点上方20点
+               // 止损: 整个M顶形态最高点上方20点 (形态上方高点上方20点)
                double highest = MathMax(H0, H1);   // M顶最高点
                slTarget = highest + InpSLBufferPts * point;
                return 1;
@@ -1932,9 +1820,9 @@ int DetectMTop(double &slTarget)
 }
 
 //+------------------------------------------------------------------+
-//| ★v1.22 顺势关键位突破 (替代原"窄幅平台"逻辑)                      |
-//| 多头: bar1收盘 > 前N根K线最高(阻力位)+缓冲 → 突破开多               |
-//| 空头: bar1收盘 < 前N根K线最低(支撑位)+缓冲 → 跌破开空               |
+//| 顺势平台突破 (突破开仓: 对重要支撑/阻力位的突破)                  |
+//| 多头: bar1收盘 > 前N根K线最高(重要阻力位)+缓冲 → 突破开多          |
+//| 空头: bar1收盘 < 前N根K线最低(重要支撑位)+缓冲 → 跌破开空          |
 //| SL: 形态底部/顶部 ± InpSLBufferPts 缓冲(20点)                     |
 //+------------------------------------------------------------------+
 int DetectPlatform()
@@ -1960,18 +1848,21 @@ int DetectPlatform()
 }
 
 //+------------------------------------------------------------------+
-//| ★v2.05 回调入场: 2B法则 (顺大趋势等回调企稳, 防追高追空)          |
-//| 理念: 顺大趋势 → 逆小回调 → 2B/双底企稳后入场                     |
+//| ★2B形态开仓 (顺大趋势, 只在趋势行情中做; 调整行情2B不开仓)       |
+//| 理念: 多头趋势中区分两种行情                                        |
+//|   - 趋势行情: 不断创新高, 每次回调低点不断抬高 (HH+HL上升结构)     |
+//|   - 调整行情: 每次向下回调低点都低于前一次 (LH+LL下跌结构)         |
+//|   只在趋势行情(HH+HL)中符合2B法则才开多; 调整行情中的2B机会不开仓  |
 //| 多头(空头镜像):                                                   |
 //|   1. 找回调起点波段高点 H → 回调第一个低点 L1 (Swing Low)          |
-//|      ★v2.02 回调板块专用 PB_STRENGTH=2 (左右各2根确认)            |
-//|      ★v2.05 结构前提: HH+HL多头(高点/低点逐个升高)/LH+LL空头镜像  |
+//|      ★ 回调板块专用 PB_STRENGTH=2 (左右各2根确认)                 |
+//|      ★ 趋势行情前提: 多头HH+HL(高点/低点逐个升高) / 空头LH+LL镜像 |
 //|   2. 回调深度: (H-L1) ≥ (H-L0)×PctMin (防追单)                    |
 //|   3. L1 之后 Inp2BMaxBars 根内找最低点 L2                          |
-//|      ★v2.01 总窗口: L1出现后 ≤34根内必须完成"跌破+收回"全程       |
+//|      ★ 总窗口: L1出现后 ≤34根内必须完成"跌破+收回"全程             |
 //|      场景A 标准2B: L2跌破L1 → 当前收盘收回L1上方 → 下根开盘做多    |
 //|      场景B 双底企稳: L2未破L1 且 |L2-L1|≤Inp2BMaxGapPts + 企稳阳线 |
-//| 止损: 两低点中最低者 - 20点; 止盈: CheckEntry统一 2:1             |
+//| 止损: 两低点中最低者 - 20点; 止盈: CheckEntry统一 2.6:1            |
 //| 返回: 1=BUY  -1=SELL  0=无信号                                    |
 //| 输出: slTarget 止损价, name 信号名                                 |
 //+------------------------------------------------------------------+
@@ -1987,7 +1878,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
    double close1 = iClose(_Symbol, InpPatternTF, 1);
 
    bool   isBull = (g_trendDir == 1);
-   // ★v2.02 回调板块专用: 摆动确认数=2根(左右各2根), minGap=5, 避开bar0-4未确认K线
+   // ★2B板块专用: 摆动确认数=2根(左右各2根), minGap=5, 避开bar0-4未确认K线
    //   与全局 InpSwingStrength=3 解耦(W底/M顶/平台仍用3根确认)
    const int PB_STRENGTH = 2;
    int    minGap = PB_STRENGTH * 2 + 1;
@@ -2009,7 +1900,9 @@ int DetectPullbackEntry(double &slTarget, string &name)
       double waveAmp = H - L0;
       if(waveAmp <= 0) return 0;
 
-      // --- ★v2.05 形态结构前提: 多头HH+HL (每一浪高点升高+低点升高) ---
+      // --- ★趋势行情前提: 多头HH+HL (每一浪高点升高+低点升高) ---
+      //   满足=趋势行情(创新高+低点抬高) → 允许2B开多
+      //   不满足=调整行情(下跌结构) → 2B不开仓 (InpUse2BStructure=false时关闭此前提)
       if(InpUse2BStructure)
       {
          // 高点升高: H 之前更早的摆动高点 < H (前高低于当前波段高点)
@@ -2028,7 +1921,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
       // --- 3. 找回调第一个低点 L1 (H 之后最近的Swing Low) ---
       int idxL1 = FindSwingLow(minGap, idxH - PB_STRENGTH - 1, PB_STRENGTH);
       if(idxL1 <= 0) return 0;
-      // ★v2.01 总窗口: L1出现后 Inp2BMaxBars 根内必须完成"跌破+收回"
+      // ★总窗口: L1出现后 Inp2BMaxBars 根内必须完成"跌破+收回"
       //   bar1(确认K线)距L1超过窗口 → 信号过期(跌破+收回全程超出34根)
       if(idxL1 - 1 > Inp2BMaxBars) return 0;
       double L1 = iLow(_Symbol, InpPatternTF, idxL1);
@@ -2052,7 +1945,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
       if(L2 < L1 && close1 > L1)
       {
          slTarget = MathMin(L1, L2) - InpSLBufferPts * point;
-         name = "回调2B-破位收回(多)";
+         name = "2B形态-破位收回(多)";
          return 1;
       }
 
@@ -2066,7 +1959,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
          if(close1 <= L2)    return 0;                                    // 收盘需站上最近低点
          if(body / fullRange < InpPullbackStabBodyPct) return 0;          // 排除十字星
          slTarget = MathMin(L1, L2) - InpSLBufferPts * point;
-         name = "回调2B-双底企稳(多)";
+         name = "2B形态-双底企稳(多)";
          return 1;
       }
    }
@@ -2084,7 +1977,9 @@ int DetectPullbackEntry(double &slTarget, string &name)
       double waveAmp = H0 - L;
       if(waveAmp <= 0) return 0;
 
-      // --- ★v2.05 形态结构前提: 空头LH+LL (每一浪高点降低+低点降低) ---
+      // --- ★趋势行情前提: 空头LH+LL (每一浪高点降低+低点降低) ---
+      //   满足=趋势行情(创新低+高点降低) → 允许2B开空
+      //   不满足=调整行情(上升结构) → 2B不开仓
       if(InpUse2BStructure)
       {
          // 低点降低: L 之前更早的摆动低点 > L (前低高于当前波段低点)
@@ -2103,7 +1998,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
       // --- 3. 找回调第一个高点 H1 (L 之后最近的Swing High) ---
       int idxH1 = FindSwingHigh(minGap, idxL - PB_STRENGTH - 1, PB_STRENGTH);
       if(idxH1 <= 0) return 0;
-      // ★v2.01 总窗口: H1出现后 Inp2BMaxBars 根内必须完成"突破+收回"
+      // ★总窗口: H1出现后 Inp2BMaxBars 根内必须完成"突破+收回"
       if(idxH1 - 1 > Inp2BMaxBars) return 0;
       double H1 = iHigh(_Symbol, InpPatternTF, idxH1);
 
@@ -2126,7 +2021,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
       if(H2 > H1 && close1 < H1)
       {
          slTarget = MathMax(H1, H2) + InpSLBufferPts * point;
-         name = "回调2B-破位收回(空)";
+         name = "2B形态-破位收回(空)";
          return -1;
       }
 
@@ -2140,7 +2035,7 @@ int DetectPullbackEntry(double &slTarget, string &name)
          if(close1 >= H2)    return 0;                                    // 收盘需跌破最近高点
          if(body / fullRange < InpPullbackStabBodyPct) return 0;          // 排除十字星
          slTarget = MathMax(H1, H2) + InpSLBufferPts * point;
-         name = "回调2B-双顶企稳(空)";
+         name = "2B形态-双顶企稳(空)";
          return -1;
       }
    }
@@ -2226,12 +2121,11 @@ void CloseAllPositionsAtEnd()
 
 //+------------------------------------------------------------------+
 //| 主入场检查 (新M1 K线开盘时调用)                                   |
-//| ★ v1.05重构: 只顺趋势方向 + 3种形态(平台突破/W底/M顶)三模式       |
+//| ★ 戴维策略: 顺势交易 + 突破开仓 + 2B形态开仓(仅趋势行情)          |
 //|   - EMA55/MA233金叉=多头趋势只做多, 死叉=空头趋势只做空           |
-//|   - W底: 标准(破颈线)/激进①(未破位)/激进②(破位5根内收回)        |
-//|   - M顶: 镜像                                                      |
-//|   - 平台突破: 只做顺趋势方向的突破(反向突破不交易)                |
-//|   - 每笔强制 SL(形态极值) + TP(2×SL, 盈亏比2:1)                   |
+//|   - 突破开仓: W底/M顶标准(破颈线) + 顺势平台突破(重要支撑阻力)    |
+//|   - 2B形态开仓: 只在趋势行情(HH+HL/LH+LL)中做, 调整行情2B不开仓   |
+//|   - 每笔强制 SL(形态极值) + TP(2.6×SL, 固定盈亏比2.6:1)           |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -2292,25 +2186,21 @@ void CheckEntry()
    ENUM_ORDER_TYPE signal = WRONG_VALUE;
    string signalName = "";
 
-   // ===== W底 (多头趋势) — 标准/激进①/激进② =====
+   // ===== W底 (多头趋势) — 突破开仓: 标准(破颈线) =====
    if(allowLong)
    {
       int mode = DetectWBottom(slTarget);
       if(mode == 1)      { signal = ORDER_TYPE_BUY; signalName = "W底-标准(破颈线)"; }
-      else if(mode == 2) { signal = ORDER_TYPE_BUY; signalName = "W底-激进①(未破位)"; }
-      else if(mode == 3) { signal = ORDER_TYPE_BUY; signalName = "W底-激进②(破位收回)"; }
    }
 
-   // ===== M顶 (空头趋势) — 镜像 =====
+   // ===== M顶 (空头趋势) — 突破开仓: 标准(破颈线) 镜像 =====
    if(signal == WRONG_VALUE && allowShort)
    {
       int mode = DetectMTop(slTarget);
       if(mode == 1)      { signal = ORDER_TYPE_SELL; signalName = "M顶-标准(破颈线)"; }
-      else if(mode == 2) { signal = ORDER_TYPE_SELL; signalName = "M顶-激进①(未破位)"; }
-      else if(mode == 3) { signal = ORDER_TYPE_SELL; signalName = "M顶-激进②(破位收回)"; }
    }
 
-   // ===== 顺势关键位突破 (★v1.22: 替代原"窄幅平台"逻辑) =====
+   // ===== 顺势平台突破 (突破开仓: 对重要支撑/阻力位的突破, 只顺趋势方向) =====
    if(signal == WRONG_VALUE && InpUsePlatform)
    {
       int platDir = DetectPlatform();
@@ -2326,7 +2216,7 @@ void CheckEntry()
          }
          slTarget = lo - InpSLBufferPts * _Point;
          signal = ORDER_TYPE_BUY;
-         signalName = "顺势关键位突破(多)";
+         signalName = "顺势平台突破(多)";
       }
       // 空头趋势: 只做向下突破(platDir=-1), 向上突破不交易
       else if(platDir == -1 && allowShort)
@@ -2340,15 +2230,15 @@ void CheckEntry()
          }
          slTarget = hi + InpSLBufferPts * _Point;
          signal = ORDER_TYPE_SELL;
-         signalName = "顺势关键位突破(空)";
+         signalName = "顺势平台突破(空)";
       }
    }
 
    // ============================================================
-   // ★v2.02 回调入场: 2B法则 (摆动确认2根 + 场景A标准2B破位收回 / 场景B双底企稳)
-   //   v2.01 总窗口: 跌破+收回全程限 L1 后 Inp2BMaxBars 根内
-   //   优先级: 形态突破(W底/M顶/平台) > 回调入场(补充)
-   //   形态未触发时, 才评估回调 (避免重复信号)
+   // ★2B形态开仓 (只在趋势行情中做; 调整行情2B不开仓)
+   //   场景A标准2B破位收回 / 场景B双底(双顶)企稳
+   //   优先级: 突破开仓(W底/M顶/平台) > 2B形态开仓(补充)
+   //   突破未触发时, 才评估2B (避免重复信号)
    // ============================================================
    if(signal == WRONG_VALUE && InpUsePullbackEntry)
    {
@@ -2435,7 +2325,7 @@ void CheckEntry()
    {
       g_lastEntryBarTime = sigBarTime;
 
-      // 精确修正形态SL/TP (金刚经: 止损设在形态极值绝对价格, 止盈按盈亏比)
+      // 精确修正形态SL/TP (戴维策略: 止损设在形态极值绝对价格, 止盈按2.6:1盈亏比)
       ulong ticket = FindLastPositionTicket();
       if(ticket != 0)
       {
@@ -2482,7 +2372,7 @@ ulong FindLastPositionTicket()
 }
 
 //+------------------------------------------------------------------+
-//| 精确设置形态SL/TP (金刚经: 止损设在形态极值绝对价格)               |
+//| 精确设置形态SL/TP (戴维策略: 止损设在形态极值绝对价格)            |
 //| ★ v1.04: 每笔强制带SL+TP, TP = 入场价 ± 2×SL区间 (盈亏比2:1)      |
 //|   不再受 InpUseFixedStopLoss/InpUseFixedTakeProfit 开关控制        |
 //+------------------------------------------------------------------+
