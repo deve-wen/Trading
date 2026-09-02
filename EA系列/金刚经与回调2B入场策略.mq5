@@ -1,4 +1,4 @@
-//+------------------------------------------------------------------+
+﻿//+------------------------------------------------------------------+
 //|                    金刚经与回调入场策略.mq5                        |
 //|                                                                   |
 //|  基于《金刚经_黄金M1_形态突破 v1.10》独立拆分的回调入场策略        |
@@ -21,18 +21,17 @@
 //|             或 L2未破L1且价差≤200点 + 企稳阳线开多 (空头镜像)     |
 //|  入场: 形态/回调收盘确认 → 下根K线开盘市价入场                    |
 //|  止损: 形态/波段极值 - 20点 (绝对价格, 每笔必带)                  |
-//|  止盈: 强制 2:1 盈亏比 (TP = 入场价 ± 2×SL区间, 每笔必带)         |
+//|  止盈: ★v2.07盈亏比开关: 开=入场±盈亏比×SL区间 / 关=固定SL(InpFixedSLPoints)+固定TP(InpFixedTPPoints) |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "2.05"
+#property version   "2.07"
 #property description "金刚经与回调入场策略: EMA55/MA233顺势 + 形态突破 + 2B法则回调入场(独立EA)"
 #property description "① 趋势: EMA55/MA233金叉死叉只做顺势; W底/M顶三模式+平台突破"
-#property description "② ★v2.00回调入场改2B法则: 破位收回(标准2B) / 双底未破+企稳阳线, 只顺大趋势"
-#property description "③ v2.02: 摆动确认=2根; v2.01跌破+收回总窗口≤L1后34根; SL/TP 2:1"
-#property description "④ 风控: 止损≥1500点拒开; 追踪A/B/C三选一; 分批止盈; 平仓冷却"
-#property description "⑤ 防历史回放; 顺势关键位突破; 自动时区; 诊断日志"
-#property description "⑥ ★v2.04不持仓过夜: 收盘前N分钟强平全部持仓; 收盘前30分钟禁开新仓"
-#property description "⑦ v2.05: 2B结构前提HH+HL(多)/LH+LL(空), 双前提才开仓"
+#property description "② 2B回调: 破位收回(标准2B) / 双底企稳; 只顺大趋势; 摆动确认2根"
+#property description "③ 2B双前提: 金叉(多)+HH+HL结构; 跌破+收回总窗口≤34根(M1)"
+#property description "④ v2.04不持仓过夜: 收盘前N分钟强平全部; 收盘前30分钟禁开仓"
+#property description "⑤ v2.07盈亏比开关: 开=SL×盈亏比TP(原逻辑); 关=SL与TP均固定点数(InpFixedSLPoints/TPPoints)"
+#property description "⑥ 风控: 止损≥1500拒开; 追踪A/B/C; 分批止盈; 防历史回放; 自动时区"
 
 #include <Trade\Trade.mqh>
 
@@ -68,8 +67,8 @@ input bool   InpUseFixedStopLoss   = true;   // 启用固定止损(强制true: �
 input bool   InpUseFixedTakeProfit = true;   // 启用固定止盈(强制true: 2:1 TP必带)
 
 //=== ★ 止损与追踪(共用基础参数) ===
-input int    InpFixedSLPoints      = 300;    // 固定止损点数
-input int    InpFixedTPPoints      = 660;    // 固定止盈点数
+input int    InpFixedSLPoints      = 300;    // 固定止损点数(盈亏比关闭时: SL固定为此点数)
+input int    InpFixedTPPoints      = 660;    // 固定止盈点数(盈亏比关闭时: TP固定为此点数)
 
 //=== ★ 追踪方式A: 渐进式(持续追踪SL,二选一) ===
 input bool   InpUseTrailingA       = false;  // 启用追踪A(与B互斥)  ← 勾选即用A
@@ -1229,6 +1228,7 @@ input group "=== ★ 出场参数 ==="
 input int    InpSLBufferPts      = 20;       // 形态止损缓冲(点)
 input int    InpMaxPositions     = 2;        // ★v1.15 最大同时持仓数(2=分批止盈平部分后可开新仓)
 input double InpRewardRiskRatio  = 2.0;      // 盈亏比(TP/SL倍数): 2=2:1, 3=3:1, 5=5:1等
+input bool   InpUseRiskReward    = true;     // ★v2.07 盈亏比开关: true=原逻辑(形态SL+TP=盈亏比×SL); false=SL与TP均用固定点数
 
 input group "=== ★ v1.15 分批止盈(独立开关, 每档比例可调) ==="
 input bool   InpUseTieredTP      = true;     // 启用分批止盈(利润达1/2/3倍止损空间分批平仓)
@@ -1309,6 +1309,12 @@ int OnInit()
    if(InpSwingStrength < 2) { Print("❌ 摆动点强度必须>=2"); return(INIT_PARAMETERS_INCORRECT); }
    if(InpPlatLookback < 5)  { Print("❌ 平台回看K线数必须>=5"); return(INIT_PARAMETERS_INCORRECT); }
    if(InpRewardRiskRatio <= 0.1) { Print("❌ 盈亏比必须>0.1"); return(INIT_PARAMETERS_INCORRECT); }
+   // ★v2.07 盈亏比关闭校验: 固定SL/TP点数必须>0 (SL/TP均采用固定点数)
+   if(!InpUseRiskReward && (InpFixedSLPoints <= 0 || InpFixedTPPoints <= 0))
+   {
+      Print("❌ 盈亏比已关闭, 固定止损点数(InpFixedSLPoints)与固定止盈点数(InpFixedTPPoints)必须>0");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
    if(InpUseTieredTP)
    {
       if(InpTier1ClosePct <= 0 || InpTier1ClosePct >= 1.0) { Print("❌ 第1档平仓比例须在(0,1)"); return(INIT_PARAMETERS_INCORRECT); }
@@ -1381,7 +1387,9 @@ int OnInit()
    Print("   EMA55/MA233趋势判断: ", (InpUseTrendFilter ? "开启(只做顺势)" : "关闭(多空双向)"));
    Print("   趋势MA: ", InpFastMAPeriod, "/", InpSlowMAPeriod,
          " 初始趋势: ", (g_trendDir == 1 ? "多头" : "空头"));
-   Print("   出场: 每笔强制SL(形态极值) + TP(", DoubleToString(InpRewardRiskRatio, 1), ":1盈亏比, 可调)");
+   Print("   出场: 每笔强制SL(形态极值); ★v2.06 TP模式: ",
+         (InpUseRiskReward ? "盈亏比 " + DoubleToString(InpRewardRiskRatio, 1) + ":1 (TP=SL×盈亏比)"
+                           : "固定SL " + (string)InpFixedSLPoints + "点/固定TP " + (string)InpFixedTPPoints + "点"));
    Print("   风控: 最大止损限制=", (InpUseMaxSLPoints ? "开启" : "关闭"),
          " 上限=", InpMaxSLPoints, "点 (", DoubleToString(InpMaxSLPoints * _Point, 2), "美元)");
    if(InpUseTrailingA)
@@ -1393,7 +1401,9 @@ int OnInit()
             " 形态缓冲=", InpTrailingCSLBufferPts, ")");
    Print("   激进①回调深度: ≥ 反弹幅度的 ", InpAggrPullbackPct * 100, "% (防追单)");
    Print("   ★v1.14 平仓冷却: ", (InpUseCloseCooldown ? "启用" : "禁用"),
-         " 平仓后", InpCloseCooldownBars, "根K线内禁止再开仓 | 盈亏比=", DoubleToString(InpRewardRiskRatio, 1), ":1");
+         " 平仓后", InpCloseCooldownBars, "根K线内禁止再开仓 | TP模式: ",
+         (InpUseRiskReward ? "盈亏比" + DoubleToString(InpRewardRiskRatio, 1) + ":1"
+                           : "固定SL/TP " + (string)InpFixedSLPoints + "/" + (string)InpFixedTPPoints + "点"));
    Print("   ★v1.15 分批止盈: ", (InpUseTieredTP ? "启用" : "禁用"),
          " 第1档@", DoubleToString(InpTier1ProfitMult, 1), "xSL平", DoubleToString(InpTier1ClosePct * 100, 0), "%",
          " 第2档@", DoubleToString(InpTier2ProfitMult, 1), "xSL平剩余", DoubleToString(InpTier2ClosePct * 100, 0), "%",
@@ -2403,7 +2413,18 @@ void CheckEntry()
                        ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
                        : SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-   // 止损点数(用于通用模块手数计算)
+   // ★v2.07 盈亏比开关: true=形态SL + TP=盈亏比×SL(原逻辑); false=SL与TP均用固定点数
+   bool useFixedSLTP = !InpUseRiskReward;
+   if(useFixedSLTP)
+   {
+      // 固定模式: SL目标改写为 入场价±固定止损点数(InpFixedSLPoints, 不走形态落点)
+      double fixedSLDist = (double)InpFixedSLPoints * _Point;
+      slTarget = (signal == ORDER_TYPE_BUY)
+                 ? entryPrice - fixedSLDist
+                 : entryPrice + fixedSLDist;
+   }
+
+   // 止损点数(用于通用模块手数计算) [固定模式=固定止损点数, 手数/风控/分批基准一致]
    double slPoints = MathAbs(entryPrice - slTarget) / _Point;
    if(slPoints < 10) slPoints = 10;   // 最小SL保护(防手数过大)
 
@@ -2417,14 +2438,21 @@ void CheckEntry()
       return;
    }
 
-   // ★v1.14 盈亏比可调: TP = 入场 ± InpRewardRiskRatio × SL区间 (默认2:1, 可3:1/5:1等)
-   // ★v1.15 启用分批止盈时: TP放远到第3档倍数位置, 由分批止盈主导出场(避免固定TP抢先全平)
-   double tpPoints = InpRewardRiskRatio * slPoints;
-   if(InpUseTieredTP)
+   // ★v2.07 止盈点数: 开=盈亏比×SL(分批止盈时TP放远由分批主导); 关=固定TP点数(InpFixedTPPoints, 不再放大)
+   double tpPoints;
+   if(useFixedSLTP)
    {
-      double maxMult = InpTier3ProfitMult;
-      if(maxMult < InpRewardRiskRatio) maxMult = InpRewardRiskRatio;
-      tpPoints = maxMult * slPoints;
+      tpPoints = (double)InpFixedTPPoints;      // 固定TP点数(出场终点, 不被分批止盈放大)
+   }
+   else
+   {
+      tpPoints = InpRewardRiskRatio * slPoints;
+      if(InpUseTieredTP)
+      {
+         double maxMult = (InpTier3ProfitMult > InpRewardRiskRatio) ? InpTier3ProfitMult : InpRewardRiskRatio;
+         double tierTP  = maxMult * slPoints;
+         if(tierTP > tpPoints) tpPoints = tierTP;
+      }
    }
    double tpTarget = (signal == ORDER_TYPE_BUY)
                      ? entryPrice + tpPoints * _Point
@@ -2452,7 +2480,8 @@ void CheckEntry()
             " 形态SL=", DoubleToString(slTarget, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)),
             " 止损点数=", DoubleToString(slPoints, 1),
             " 止盈点数=", DoubleToString(tpPoints, 1),
-            " (盈亏比", DoubleToString(InpRewardRiskRatio, 1), ":1)",
+            (InpUseRiskReward ? " (盈亏比" + DoubleToString(InpRewardRiskRatio, 1) + ":1)"
+                              : " (固定SL " + (string)InpFixedSLPoints + "/TP " + (string)InpFixedTPPoints + "点)"),
             InpUseTieredTP ? StringFormat(" | 分批止盈: %.0f%%/%.0f%%/%.0f%% @ %.0fx/%.0fx/%.0fxSL",
                 InpTier1ClosePct * 100, InpTier2ClosePct * 100, InpTier3ClosePct * 100,
                 InpTier1ProfitMult, InpTier2ProfitMult, InpTier3ProfitMult) : "");
@@ -2497,13 +2526,15 @@ void SetExactSLTP(ulong ticket, double slTarget, double tpTarget)
    double currentSL = PositionGetDouble(POSITION_SL);
    double currentTP = PositionGetDouble(POSITION_TP);
 
-   // ★v1.14 强制盈亏比止盈: 若外部未提供tpTarget, 按入场价±InpRewardRiskRatio×SL距离计算
+   // ★v2.07 止盈后备: 外部未提供tpTarget时, 盈亏比开=×SL距离; 关=固定TP点数(InpFixedTPPoints)
    if(tpTarget <= 0)
    {
       double slDist = MathAbs(openPrice - slTarget);
+      double tpDist = InpUseRiskReward ? InpRewardRiskRatio * slDist
+                                       : (double)InpFixedTPPoints * _Point;
       tpTarget = (posType == POSITION_TYPE_BUY)
-                 ? openPrice + InpRewardRiskRatio * slDist
-                 : openPrice - InpRewardRiskRatio * slDist;
+                 ? openPrice + tpDist
+                 : openPrice - tpDist;
    }
 
    double newSL = currentSL;
