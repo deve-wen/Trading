@@ -25,13 +25,14 @@
 //|  收盘: ★不持仓过夜: 收盘前N分钟强平; 收盘前30分钟禁开新仓         |
 //+------------------------------------------------------------------+
 #property copyright "Senior Developer"
-#property version   "1.02"
+#property version   "1.03"
 #property description "戴维策略: EMA55/MA233顺势 + 突破开仓(W底/M顶/平台) + 2B形态开仓(仅趋势行情)"
 #property description "① 突破开仓: W底/M顶标准破颈线 + 顺势平台突破(重要支撑阻力)"
 #property description "② 2B形态开仓: 仅趋势行情(HH+HL/LH+LL)做2B; 调整行情不做2B"
 #property description "③ 风控: 止损≥1500拒开; 追踪A/B/C; 分批止盈; 平仓冷却; 防历史回放"
 #property description "④ 收盘强平+禁开仓(不持仓过夜); 自动时区"
 #property description "⑤ v1.02盈亏比开关: 开=SL×盈亏比TP(原逻辑); 关=SL与TP均固定点数(InpFixedSLPoints/TPPoints)"
+#property description "⑥ v1.03风控修复: 日亏=当日净额(盈亏相抵)达5%停开仓; 连亏3笔暂停90分钟"
 
 #include <Trade\Trade.mqh>
 
@@ -182,10 +183,15 @@ private:
    COrderInfo  m_orderInfo;          // 订单信息
 
    datetime    m_lastTradeDay;       // 最后交易日（用于日亏损重置）
-   double      m_dailyLoss;          // 当日累计亏损（正值）
+   double      m_dailyLoss;          // 当日净亏损额（净利润为负时取正值, 盈亏相抵后计算）
+   double      m_dailyNet;           // 当日已实现净额（正=净盈利, 负=净亏损）
+   double      m_dayStartBalance;    // 当日起始余额（日亏百分比计算基准）
    int         m_consecutiveLoss;    // 连续亏损次数
    datetime    m_pauseUntil;         // 暂停到期时间
-   datetime    m_lastHistoryCheck;   // 上次历史订单检查时间
+   datetime    m_lastHistoryCheck;   // 上次历史订单检查时间(保留兼容)
+   datetime    m_statsFromTime;      // 连续亏损统计起点（启动/暂停结束时刻）
+   datetime    m_lastStatsRefresh;   // 上次统计刷新时间（节流用）
+   bool        m_dailyLossNotified;  // 当日亏损上限提示是否已打印
 
    //--- 【BUG #5 修复】持久化追踪索引
    // 容量 100（v4.03 之前的旧代码只有 10，第 11 单起永远静默失败）
@@ -198,6 +204,7 @@ private:
    //--- 内部辅助函数
    bool        IsNewTradingDay();
    void        UpdateConsecutiveLossFromHistory();
+   void        RefreshTradeStats(bool force = false);
    bool        PositionSelectByTicket(ulong ticket);
    bool        IsTrailingAEnabled();
    bool        IsTrailingBEnabled();
@@ -251,9 +258,15 @@ bool CCommonTradingModule::Init(ulong magicNumber, string tradeComment)
 
    m_lastTradeDay = TimeCurrent();
    m_dailyLoss = 0;
+   m_dailyNet = 0;
+   m_dayStartBalance = 0;
    m_consecutiveLoss = 0;
    m_pauseUntil = 0;
    m_lastHistoryCheck = 0;
+   m_lastStatsRefresh = 0;
+   m_dailyLossNotified = false;
+   // ★ 连续亏损统计起点 = 当日 00:00(服务器时间): EA 重启不绕过风控
+   m_statsFromTime = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
 
    // 初始化持久化追踪索引（【BUG #5 修复】容量 100，旧代码 10 不够）
    for(int i = 0; i < TRAIL_SLOT_COUNT; i++)
@@ -263,8 +276,17 @@ bool CCommonTradingModule::Init(ulong magicNumber, string tradeComment)
    }
    m_trailNextIdx = 0;
 
-   // 初始化时从历史订单统计当日亏损和连续亏损
+   // 初始化时从历史订单统计当日净额和连续亏损
    UpdateConsecutiveLossFromHistory();
+
+   // ★ 反推当日起始余额: 当前余额 - 当日已实现净额（消除 EA 中途启动的基准误差）
+   if(m_dayStartBalance <= 0)
+   {
+      double balInit = AccountInfoDouble(ACCOUNT_BALANCE);
+      m_dayStartBalance = balInit - m_dailyNet;
+      if(m_dayStartBalance <= 0)
+         m_dayStartBalance = balInit;
+   }
 
    // A/B/C 互斥校验
    int trailCount = (InpUseTrailingA ? 1 : 0) + (InpUseTrailingB ? 1 : 0) + (InpUseTrailingC ? 1 : 0);
@@ -313,6 +335,15 @@ bool CCommonTradingModule::IsNewTradingDay()
    {
       m_lastTradeDay = TimeCurrent();
       m_dailyLoss = 0;
+      m_dailyNet = 0;
+      m_consecutiveLoss = 0;
+      m_pauseUntil = 0;
+      m_dailyLossNotified = false;
+      m_statsFromTime = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+
+      double balNewDay = AccountInfoDouble(ACCOUNT_BALANCE);
+      if(balNewDay > 0)
+         m_dayStartBalance = balNewDay;   // 新交易日: 以当前余额为日亏基准
       return true;
    }
    return false;
@@ -337,38 +368,74 @@ bool CCommonTradingModule::PositionSelectByTicket(ulong ticket)
 //+------------------------------------------------------------------+
 void CCommonTradingModule::UpdateConsecutiveLossFromHistory()
 {
-   if(!InpUseConsecutiveLossPause)
+   // ★ 统一走全量重算引擎（不再单独维护一套统计逻辑）
+   RefreshTradeStats(true);
+}
+
+//+------------------------------------------------------------------+
+//| ★ 刷新当日交易统计（幂等全量重算, 不依赖 OnTrade 事件时序）          |
+//|   1) 当日已实现净额 = 当日所有 deal 的 profit+swap+commission 之和 |
+//|   2) 净亏损 = 净额为负时取绝对值（盈利与亏损互相抵消 → 净额口径）   |
+//|   3) 连续亏损 = 从最新平仓往前数, 遇盈利中断; 仅统计起始时刻之后    |
+//|   幂等设计: 每次调用都重算, 多次/漏调用均不会重复累加或漏统计      |
+//+------------------------------------------------------------------+
+void CCommonTradingModule::RefreshTradeStats(bool force)
+{
+   // 节流: 同一秒内只算一次(强制刷新时忽略)
+   if(!force && m_lastStatsRefresh > 0 && (TimeCurrent() - m_lastStatsRefresh) < 1)
       return;
 
-   datetime startTime = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
-   datetime endTime = TimeCurrent();
+   IsNewTradingDay();          // 跨日先重置
+   m_lastStatsRefresh = TimeCurrent();
 
-   m_consecutiveLoss = 0;
+   datetime dayStart = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
+   datetime dayEnd   = TimeCurrent() + 60;   // 兜住尚未同步的成交
 
-   HistorySelect(startTime, endTime);
+   if(!HistorySelect(dayStart, dayEnd))
+      return;
+
    int total = HistoryDealsTotal();
-   for(int i = total - 1; i >= 0; i--)
+   double netSum = 0.0;
+   int consec = 0;
+   bool consecBroken = false;
+
+   for(int i = total - 1; i >= 0; i--)       // 时间序: 最新 → 最早
    {
       ulong ticket = HistoryDealGetTicket(i);
       if(ticket == 0)
          continue;
 
+      double profit     = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+      double swap       = HistoryDealGetDouble(ticket, DEAL_SWAP);
+      double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+      double net        = profit + swap + commission;
+
+      netSum += net;    // 净额: 盈利与亏损一起累加(含开仓手续费 deal)
+
       ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
       if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
+         continue;      // 只以平仓 deal 判定单笔胜负
+
+      if(consecBroken)
          continue;
 
-      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-      double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
-      double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-      double net = profit + swap + commission;
+      datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+      if(dealTime < m_statsFromTime)   // 早于统计起点(上一轮暂停前的历史) → 停止计数
+      {
+         consecBroken = true;
+         continue;
+      }
 
-      if(net > 0)
-         break;  // 遇到盈利则停止统计连续亏损
-      else
-         m_consecutiveLoss++;
+      if(net < 0)
+         consec++;
+      else if(net > 0)
+         consecBroken = true;          // 遇到盈利 → 连续亏损中断
+      // net == 0(保本/仅手续费) 不改变连续性
    }
 
-   m_lastHistoryCheck = TimeCurrent();
+   m_dailyNet        = netSum;
+   m_dailyLoss       = (netSum < 0) ? -netSum : 0.0;
+   m_consecutiveLoss = consec;
 }
 
 //+------------------------------------------------------------------+
@@ -409,6 +476,9 @@ bool CCommonTradingModule::IsTradeTimeAllowed()
 //+------------------------------------------------------------------+
 bool CCommonTradingModule::IsTradingAllowed()
 {
+   // ★ 开仓判定前强制刷新统计, 保证用最新净额与连续亏损次数判定
+   RefreshTradeStats(true);
+
    if(!IsTradeTimeAllowed())
       return false;
 
@@ -450,43 +520,78 @@ bool CCommonTradingModule::CheckSpreadLimit()
 //+------------------------------------------------------------------+
 //| 检查当日最大亏损限制                                                 |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| 检查当日最大净亏损限制                                              |
+//| ★净额口径: 当日所有交易(盈利+亏损+手续费+隔夜利息)求和后,          |
+//|   仅当【净额亏损】达到 当日起始余额×InpDailyLossPercent% 时禁开仓   |
+//|   （盈利会抵扣亏损, 不是把亏损简单累加）                            |
+//+------------------------------------------------------------------+
 bool CCommonTradingModule::CheckDailyLossLimit()
 {
    if(!InpUseDailyLossLimit)
       return true;
 
-   IsNewTradingDay(); // 跨日重置
+   IsNewTradingDay();     // 跨日重置
+   RefreshTradeStats();   // 上层已强制刷新则走节流, 不会重复计算
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double maxLoss = balance * InpDailyLossPercent / 100.0;
+   double baseBalance = (m_dayStartBalance > 0) ? m_dayStartBalance
+                                                 : AccountInfoDouble(ACCOUNT_BALANCE);
+   if(baseBalance <= 0)
+      return true;
+
+   double maxLoss = baseBalance * InpDailyLossPercent / 100.0;
 
    if(m_dailyLoss >= maxLoss)
+   {
+      if(!m_dailyLossNotified)
+      {
+         m_dailyLossNotified = true;
+         Print("🚫 当日净亏损 ", DoubleToString(m_dailyLoss, 2), " ≥ 上限 ",
+               DoubleToString(maxLoss, 2), " (当日起始余额 ", DoubleToString(baseBalance, 2),
+               " × ", DoubleToString(InpDailyLossPercent, 1), "%) | 当日净额=",
+               DoubleToString(m_dailyNet, 2), " → 当日停止开仓");
+      }
       return false;
+   }
 
+   m_dailyLossNotified = false;
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| 检查连续亏损暂停                                                     |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| 检查连续亏损暂停                                                    |
+//| ★连续亏损次数由 RefreshTradeStats 全量重算(从最新平仓往前数),       |
+//|   达到阈值 → 暂停 InpPauseMinutes 分钟; 到期后从解锁时刻重新计数    |
+//+------------------------------------------------------------------+
 bool CCommonTradingModule::CheckConsecutiveLossPause()
 {
    if(!InpUseConsecutiveLossPause)
       return true;
 
-   if(TimeCurrent() < m_pauseUntil)
+   RefreshTradeStats();   // 上层已强制刷新则走节流, 不会重复计算
+
+   // 暂停期内: 禁止开仓
+   if(m_pauseUntil > 0 && TimeCurrent() < m_pauseUntil)
       return false;
 
-   // 暂停已到期，重置
+   // 暂停已到期 → 解锁, 并从此刻重新统计连续亏损
    if(m_pauseUntil > 0 && TimeCurrent() >= m_pauseUntil)
    {
+      Print("✅ 连续亏损暂停结束, 恢复交易 (连续亏损重新计数)");
       m_pauseUntil = 0;
       m_consecutiveLoss = 0;
+      m_statsFromTime = TimeCurrent();
    }
 
    if(m_consecutiveLoss >= InpConsecutiveLossCount)
    {
       m_pauseUntil = TimeCurrent() + InpPauseMinutes * 60;
+      Print("⏸️ 连续亏损 ", m_consecutiveLoss, " 笔 ≥ 阈值 ", InpConsecutiveLossCount,
+            " → 暂停开仓 ", InpPauseMinutes, " 分钟, 恢复时间 ",
+            TimeToString(m_pauseUntil, TIME_DATE | TIME_MINUTES));
       return false;
    }
 
@@ -1097,6 +1202,8 @@ void CCommonTradingModule::ManageAllPositions()
 //+------------------------------------------------------------------+
 void CCommonTradingModule::OnTick()
 {
+   // ★ 主动刷新当日统计(净额/连续亏损): 不依赖 OnTrade 事件, 实盘/回测均可靠
+   RefreshTradeStats();
    ManageAllPositions();
 }
 
@@ -1105,57 +1212,8 @@ void CCommonTradingModule::OnTick()
 //+------------------------------------------------------------------+
 void CCommonTradingModule::OnTrade()
 {
-   IsNewTradingDay(); // 跨日重置
-
-   // 仅每隔一段时间检查历史，避免频繁调用
-   if(TimeCurrent() - m_lastHistoryCheck < 1)
-      return;
-
-   m_lastHistoryCheck = TimeCurrent();
-
-   datetime startTime = StringToTime(TimeToString(TimeCurrent(), TIME_DATE));
-   datetime endTime = TimeCurrent();
-
-   HistorySelect(startTime, endTime);
-   int total = HistoryDealsTotal();
-
-   // 本次只处理最新的平仓交易
-   // 注意：OnTrade 可能重复触发，需要通过记录上次处理票号避免重复
-   static ulong s_lastProcessedTicket = 0;
-
-   for(int i = total - 1; i >= 0; i--)
-   {
-      ulong ticket = HistoryDealGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(ticket <= s_lastProcessedTicket)
-         continue;
-
-      ENUM_DEAL_ENTRY dealEntry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
-      if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
-         continue;
-
-      double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT);
-      double swap = HistoryDealGetDouble(ticket, DEAL_SWAP);
-      double commission = HistoryDealGetDouble(ticket, DEAL_COMMISSION);
-      double net = profit + swap + commission;
-
-      if(net < 0)
-      {
-         m_dailyLoss += MathAbs(net);
-         m_consecutiveLoss++;
-
-         // 检查是否触发连续亏损暂停
-         if(InpUseConsecutiveLossPause && m_consecutiveLoss >= InpConsecutiveLossCount)
-            m_pauseUntil = TimeCurrent() + InpPauseMinutes * 60;
-      }
-      else
-      {
-         m_consecutiveLoss = 0;
-      }
-
-      s_lastProcessedTicket = ticket;
-   }
+   // ★ 交易事件后强制全量重算(幂等): 消除事件时序/重复触发/重启导致的漏统计与重复累加
+   RefreshTradeStats(true);
 }
 
 //+------------------------------------------------------------------+
@@ -1165,11 +1223,16 @@ void CCommonTradingModule::OnTimer()
 {
    IsNewTradingDay();
 
+   // ★ 暂停到期解锁: 从解锁时刻重新统计, 避免历史亏损造成无限暂停
    if(m_pauseUntil > 0 && TimeCurrent() >= m_pauseUntil)
    {
+      Print("✅ 连续亏损暂停结束, 恢复交易 (连续亏损重新计数)");
       m_pauseUntil = 0;
       m_consecutiveLoss = 0;
+      m_statsFromTime = TimeCurrent();
    }
+
+   RefreshTradeStats(true);
 }
 
 #endif // C_COMMON_TRADING_MODULE_MQH
